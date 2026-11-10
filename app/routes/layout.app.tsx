@@ -1,8 +1,17 @@
-import { Outlet } from "react-router";
+import { useEffect } from "react";
+import { Outlet, useNavigate, useSearchParams } from "react-router";
 import type { Route } from "./+types/layout.app";
 import { Sidebar } from "~/components/sidebar";
 import { DevUI } from "~/components/dev-ui";
 import { Toaster } from "sonner";
+import { PrototypeSwitcher } from "~/components/prototype-switcher";
+import {
+  useFakeNotifications,
+  notificationSlots,
+  notificationVariants,
+  announceArrival,
+  InboxPage,
+} from "~/components/notifications-prototype";
 import { getCurrentUserId, getDevCountry } from "~/lib/session";
 import { getCountryTierInfo, COUNTRIES } from "~/lib/ppp";
 import { eq, and, or, sql, desc } from "drizzle-orm";
@@ -227,15 +236,39 @@ export default function AppLayout({ loaderData }: Route.ComponentProps) {
     isTeamAdmin: userIsTeamAdmin,
   } = loaderData;
 
+  // PROTOTYPE: notification UX variants. Variant sticks across navigation via
+  // sessionStorage so following a Notification's link keeps the variant.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const navigate = useNavigate();
+  const variant = searchParams.get("variant") ?? "A";
+  const inboxOpen = variant !== "B" && searchParams.get("inbox") === "1";
+  const notifications = useFakeNotifications(currentUser?.role ?? null);
+  const slots = notificationSlots(variant, notifications);
+
+  useEffect(() => {
+    try {
+      const stored = sessionStorage.getItem("notif-proto-variant");
+      if (!searchParams.get("variant") && stored && stored !== "A") {
+        const params = new URLSearchParams(searchParams);
+        params.set("variant", stored);
+        setSearchParams(params, { replace: true });
+      } else if (searchParams.get("variant")) {
+        sessionStorage.setItem("notif-proto-variant", variant);
+      }
+    } catch {}
+  }, [searchParams]);
+
   return (
     <div className="flex h-screen overflow-hidden">
       <Sidebar
         currentUser={currentUser}
         recentCourses={recentCourses}
         isTeamAdmin={userIsTeamAdmin}
+        headerSlot={slots.header}
+        navSlot={slots.nav}
       />
       <main className="flex-1 overflow-y-auto">
-        <Outlet />
+        {inboxOpen ? <InboxPage store={notifications} /> : <Outlet />}
       </main>
       <DevUI
         users={users}
@@ -245,6 +278,26 @@ export default function AppLayout({ loaderData }: Route.ComponentProps) {
         countries={countries}
       />
       <Toaster position="bottom-right" richColors closeButton />
+      <PrototypeSwitcher variants={notificationVariants} current={variant}>
+        {notifications.enabled && (
+          <button
+            onClick={() =>
+              announceArrival(variant, notifications.simulateArrival(), navigate)
+            }
+            className="ml-1 rounded-full bg-fuchsia-500 px-3 py-0.5 text-xs font-semibold hover:bg-fuchsia-400"
+          >
+            Simulate arrival
+          </button>
+        )}
+        {notifications.enabled && (
+          <button
+            onClick={() => notifications.loadMany(1000)}
+            className="rounded-full bg-amber-500 px-3 py-0.5 text-xs font-semibold text-zinc-900 hover:bg-amber-400"
+          >
+            Load 1,000
+          </button>
+        )}
+      </PrototypeSwitcher>
     </div>
   );
 }
