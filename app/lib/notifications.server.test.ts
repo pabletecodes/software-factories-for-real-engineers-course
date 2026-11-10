@@ -12,6 +12,7 @@ import {
   rateCourse,
   resolveNotificationClick,
 } from "./notifications.server";
+import { pushHub, type Nudge } from "./notification-push.server";
 
 type TestDb = ReturnType<typeof createTestDb>;
 
@@ -739,5 +740,176 @@ describe("Notifications for a course status change", () => {
       ok: true,
       target: { type: "url", url: `/instructor/${base.course.id}` },
     });
+  });
+});
+
+describe("Notifications for a deleted post", () => {
+  function post(authorId: number, parentId: number | null, body: string) {
+    const result = postComment(db, authorId, lessonId, parentId, body);
+    if (!result.ok) throw new Error(result.error);
+    return result.comment;
+  }
+
+  it("tells the author when the course's Instructor deletes their reply", () => {
+    const question = post(base.instructor.id, null, "Any questions?");
+    const reply = post(base.user.id, question.id, "Why is the sky blue?");
+
+    deletePost(db, reply.id, base.instructor.id);
+
+    expect(listLatestNotifications(db, base.user.id)).toEqual([
+      expect.objectContaining({
+        kind: NotificationKind.PostDeleted,
+        read: false,
+        title: `Test Instructor removed your post on "Lesson 1"`,
+        excerpt: "Why is the sky blue?",
+        courseTitle: "Test Course",
+      }),
+    ]);
+  });
+
+  it("tells the author when a Platform Admin deletes their question", () => {
+    const admin = addUser("Admin", UserRole.Admin);
+    const question = post(base.user.id, null, "Is this off-topic?");
+
+    deletePost(db, question.id, admin.id);
+
+    expect(listLatestNotifications(db, base.user.id)).toEqual([
+      expect.objectContaining({
+        kind: NotificationKind.PostDeleted,
+        title: `Admin removed your post on "Lesson 1"`,
+        excerpt: "Is this off-topic?",
+      }),
+    ]);
+  });
+
+  it("notifies nobody when the author deletes their own post", () => {
+    const question = post(base.user.id, null, "Never mind");
+
+    deletePost(db, question.id, base.user.id);
+
+    expect(listLatestNotifications(db, base.user.id)).toEqual([]);
+  });
+
+  it("notifies nobody when the post is already deleted", () => {
+    const question = post(base.user.id, null, "Oops");
+    deletePost(db, question.id, base.instructor.id);
+
+    deletePost(db, question.id, base.instructor.id);
+
+    expect(countUnreadNotifications(db, base.user.id)).toBe(1);
+  });
+
+  it("tells only the asker when a whole question is deleted, not its repliers", () => {
+    const replier = addUser("Replier");
+    const question = post(base.user.id, null, "A question");
+    post(replier.id, question.id, "A reply");
+
+    deletePost(db, question.id, base.instructor.id);
+
+    const deletedKinds = (userId: number) =>
+      listLatestNotifications(db, userId)
+        .map((n) => n.kind)
+        .filter((kind) => kind === NotificationKind.PostDeleted);
+    expect(deletedKinds(base.user.id)).toEqual([NotificationKind.PostDeleted]);
+    expect(deletedKinds(replier.id)).toEqual([]);
+  });
+
+  it("keeps a long post's excerpt short", () => {
+    const question = post(base.user.id, null, "a".repeat(500));
+
+    deletePost(db, question.id, base.instructor.id);
+
+    const [notification] = listLatestNotifications(db, base.user.id);
+    expect(notification.excerpt).toBe(`${"a".repeat(199)}…`);
+  });
+
+  it("keeps the lesson title and excerpt after the lesson is hard-deleted", () => {
+    const question = post(base.user.id, null, "Off-topic rant");
+    deletePost(db, question.id, base.instructor.id);
+    // Comments are not cleaned up when a lesson goes; take them out of the way.
+    db.delete(schema.comments).run();
+    db.delete(schema.lessons).where(eq(schema.lessons.id, lessonId)).run();
+
+    expect(listLatestNotifications(db, base.user.id)).toEqual([
+      expect.objectContaining({
+        title: `Test Instructor removed your post on "Lesson 1"`,
+        excerpt: "Off-topic rant",
+      }),
+    ]);
+  });
+
+  it("marks it read on click and stays put", () => {
+    const question = post(base.user.id, null, "Off-topic rant");
+    deletePost(db, question.id, base.instructor.id);
+    const [notification] = listLatestNotifications(db, base.user.id);
+
+    expect(resolveNotificationClick(db, notification.id, base.user.id)).toEqual(
+      { ok: true, target: { type: "stay" } }
+    );
+    expect(countUnreadNotifications(db, base.user.id)).toBe(0);
+  });
+});
+
+// ─── Real-time arrival (#13) ───
+
+describe("nudging recipients when Notifications arrive", () => {
+  /** Lets work queued for after the current write run. */
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+  function listen(userId: number) {
+    const received: Nudge[] = [];
+    const unsubscribe = pushHub.subscribe(userId, (nudge) => {
+      received.push(nudge);
+    });
+    return { received, unsubscribe };
+  }
+
+  it("nudges the recipient with the Notification's title and course", async () => {
+    const instructor = listen(base.instructor.id);
+    const student = listen(base.user.id);
+
+    postComment(db, base.user.id, lessonId, null, "What is a closure?");
+    await settle();
+
+    expect(instructor.received).toEqual([
+      { title: "Test User asked a question", courseTitle: "Test Course" },
+    ]);
+    expect(student.received).toEqual([]);
+    instructor.unsubscribe();
+    student.unsubscribe();
+  });
+
+  it("nudges the author when staff delete their post", async () => {
+    const result = postComment(db, base.user.id, lessonId, null, "Off-topic?");
+    if (!result.ok) throw new Error(result.error);
+    await settle();
+    const student = listen(base.user.id);
+
+    deletePost(db, result.comment.id, base.instructor.id);
+    await settle();
+
+    expect(student.received).toEqual([
+      {
+        title: `Test Instructor removed your post on "Lesson 1"`,
+        courseTitle: "Test Course",
+      },
+    ]);
+    student.unsubscribe();
+  });
+
+  it("does not nudge anyone when the write is rolled back", async () => {
+    const instructor = listen(base.instructor.id);
+
+    expect(() =>
+      db.transaction(() => {
+        postComment(db, base.user.id, lessonId, null, "What is a closure?");
+        throw new Error("roll back");
+      })
+    ).toThrow("roll back");
+    await settle();
+
+    expect(listLatestNotifications(db, base.instructor.id)).toEqual([]);
+    expect(instructor.received).toEqual([]);
+    instructor.unsubscribe();
   });
 });

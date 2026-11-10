@@ -225,9 +225,10 @@ describe("receivableNotificationKinds", () => {
     ]);
   });
 
-  it("gives Instructors replies, questions, ratings and course status", () => {
+  it("gives Instructors every kind, as staff may delete their posts too", () => {
     expect(receivableNotificationKinds(UserRole.Instructor)).toEqual([
       NotificationKind.Reply,
+      NotificationKind.PostDeleted,
       NotificationKind.NewQuestion,
       NotificationKind.NewRating,
       NotificationKind.CourseStatusChanged,

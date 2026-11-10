@@ -1,5 +1,4 @@
-import { and, count, desc, eq, isNull, or } from "drizzle-orm";
-import { inArray, sql } from "drizzle-orm";
+import { and, count, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/sqlite-core";
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import * as schema from "~/db/schema";
@@ -19,6 +18,7 @@ import {
 } from "~/db/schema";
 import { MAX_COMMENT_LENGTH, MIN_COMMENT_LENGTH } from "~/lib/comments";
 import { MAX_RATING, MIN_RATING } from "~/lib/ratings";
+import { pushHub } from "~/lib/notification-push.server";
 import { checkPppAccess } from "~/lib/ppp";
 
 // ─── Notifications ───
@@ -89,11 +89,46 @@ function notify(
     (id) => id !== event.actorId
   );
   if (recipients.length > 0) {
-    tx.insert(notifications)
+    const created = tx
+      .insert(notifications)
       .values(recipients.map((recipientId) => ({ ...event, recipientId })))
-      .run();
+      .returning({ id: notifications.id })
+      .all();
+    nudgeAfterCommit(
+      tx,
+      created.map(({ id }) => id)
+    );
   }
   return recipients;
+}
+
+// ─── Nudging recipients ───
+
+/**
+ * Nudges the recipients of newly created Notifications once the write that
+ * created them has committed (ADR 0013). SQLite transactions here are
+ * synchronous, so by the time queued work runs every transaction has either
+ * committed or rolled back. Only Notifications that still exist are nudged,
+ * so a rolled-back write nudges nobody, however deeply it was nested.
+ */
+function nudgeAfterCommit(db: Queryable, notificationIds: number[]) {
+  queueMicrotask(() => {
+    try {
+      const rows = selectNotifications(db)
+        .where(inArray(notifications.id, notificationIds))
+        .all();
+      for (const row of rows) {
+        const view = toView(row);
+        pushHub.publish([row.notification.recipientId], {
+          title: view.title,
+          courseTitle: view.courseTitle,
+        });
+      }
+    } catch (error) {
+      // A nudge is only a hint to refetch; the Notification is stored.
+      console.error("Could not nudge Notification recipients", error);
+    }
+  });
 }
 
 // ─── Posting a question or a reply ───
@@ -226,14 +261,56 @@ export function deletePost(
     return { ok: true, comment: existing };
   }
 
-  const comment = db
-    .update(comments)
-    .set({ deletedAt: new Date().toISOString() })
-    .where(eq(comments.id, commentId))
-    .returning()
+  return db.transaction((tx): DeletePostResult => {
+    const comment = tx
+      .update(comments)
+      .set({ deletedAt: new Date().toISOString() })
+      .where(eq(comments.id, commentId))
+      .returning()
+      .get();
+
+    if (course) {
+      notifyPostDeleted(tx, comment, course, deleterId);
+    }
+
+    return { ok: true, comment };
+  });
+}
+
+/** How much of a deleted post its Notification keeps. */
+export const DELETED_POST_EXCERPT_LENGTH = 200;
+
+function excerptOf(body: string) {
+  return body.length > DELETED_POST_EXCERPT_LENGTH
+    ? `${body.slice(0, DELETED_POST_EXCERPT_LENGTH - 1)}…`
+    : body;
+}
+
+/**
+ * Tells a post's author that someone else deleted it. The lesson title and an
+ * excerpt are kept on the Notification, as the post and lesson may not last.
+ */
+function notifyPostDeleted(
+  tx: Queryable,
+  comment: Comment,
+  course: { courseId: number; instructorId: number },
+  deleterId: number
+) {
+  const lesson = tx
+    .select({ title: lessons.title })
+    .from(lessons)
+    .where(eq(lessons.id, comment.lessonId))
     .get();
 
-  return { ok: true, comment };
+  notify(tx, [comment.userId], {
+    kind: NotificationKind.PostDeleted,
+    actorId: deleterId,
+    courseId: course.courseId,
+    lessonId: comment.lessonId,
+    commentId: comment.id,
+    lessonTitle: lesson?.title ?? null,
+    excerpt: excerptOf(comment.body),
+  });
 }
 
 // ─── Rating a course ───
@@ -426,6 +503,11 @@ function describeNotification(
         title: `${actorName} moved your course from ${statusLabel(notification.fromStatus)} to ${statusLabel(notification.toStatus)}`,
         excerpt: null,
       };
+    case NotificationKind.PostDeleted:
+      return {
+        title: `${actorName} removed your post on "${notification.lessonTitle}"`,
+        excerpt: notification.excerpt,
+      };
     case NotificationKind.Reply:
       return {
         title:
@@ -521,6 +603,9 @@ function clickTarget(row: NotificationRow): ClickTarget {
     case NotificationKind.NewQuestion:
     case NotificationKind.Reply:
       return commentTarget(row);
+    case NotificationKind.PostDeleted:
+      // The post is gone, so there is nothing to show.
+      return { type: "stay" };
     case NotificationKind.NewRating:
       return {
         type: "url",
@@ -790,8 +875,10 @@ export function receivableNotificationKinds(
     case UserRole.Student:
       return [NotificationKind.Reply, NotificationKind.PostDeleted];
     case UserRole.Instructor:
+      // A Platform Admin may delete an Instructor's post, as any author's.
       return [
         NotificationKind.Reply,
+        NotificationKind.PostDeleted,
         NotificationKind.NewQuestion,
         NotificationKind.NewRating,
         NotificationKind.CourseStatusChanged,

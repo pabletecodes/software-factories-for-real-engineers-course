@@ -1,5 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { useFetcher, useFetchers, useNavigate } from "react-router";
+import {
+  useFetcher,
+  useFetchers,
+  useNavigate,
+  useRevalidator,
+} from "react-router";
 import { toast } from "sonner";
 import {
   ArrowRightLeft,
@@ -14,6 +19,7 @@ import {
 } from "lucide-react";
 import { NotificationKind } from "~/db/schema";
 import type { ClickTarget, NotificationView } from "~/lib/notifications.server";
+import type { Nudge } from "~/lib/notification-push.server";
 import {
   Popover,
   PopoverContent,
@@ -190,6 +196,39 @@ function DeleteNotificationButton({
   );
 }
 
+/**
+ * Listens for Notifications arriving while the page is open (ADR 0013). On a
+ * nudge it refetches the bell's data and shows a quiet toast. When a dropped
+ * connection comes back it refetches too: the stored Notifications are the
+ * source of truth, so nothing sent meanwhile is lost.
+ */
+function useNotificationArrivals() {
+  const revalidator = useRevalidator();
+  const revalidate = useRef(revalidator.revalidate);
+  revalidate.current = revalidator.revalidate;
+
+  useEffect(() => {
+    const source = new EventSource("/api/notifications/stream");
+    let dropped = false;
+
+    source.addEventListener("notification", (event) => {
+      const nudge: Nudge = JSON.parse((event as MessageEvent<string>).data);
+      revalidate.current();
+      toast(nudge.title, { description: nudge.courseTitle, duration: 3000 });
+    });
+    source.addEventListener("error", () => {
+      dropped = true;
+    });
+    source.addEventListener("open", () => {
+      if (!dropped) return;
+      dropped = false;
+      revalidate.current();
+    });
+
+    return () => source.close();
+  }, []);
+}
+
 function NotificationRow({
   notification,
   onOpen,
@@ -245,6 +284,7 @@ export function NotificationBell({
   const data = useOptimisticBellData(loaded);
   const [open, setOpen] = useState(false);
   const openNotification = useOpenNotification();
+  useNotificationArrivals();
 
   function handleOpen(id: number) {
     setOpen(false);
