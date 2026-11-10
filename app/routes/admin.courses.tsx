@@ -138,7 +138,7 @@ export async function action({ request }: Route.ActionArgs) {
       parsed.data.status
     );
     if (!result.ok) {
-      return data({ error: result.error }, { status: result.status });
+      throw data(result.error, { status: result.status });
     }
     return { success: true };
   }

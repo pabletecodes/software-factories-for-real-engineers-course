@@ -1,4 +1,14 @@
-import { and, count, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
+import {
+  and,
+  count,
+  desc,
+  eq,
+  inArray,
+  isNull,
+  ne,
+  or,
+  sql,
+} from "drizzle-orm";
 import { alias } from "drizzle-orm/sqlite-core";
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import * as schema from "~/db/schema";
@@ -6,11 +16,9 @@ import {
   comments,
   courseRatings,
   courses,
-  enrollments,
   lessons,
   modules,
   notifications,
-  purchases,
   users,
   CourseStatus,
   NotificationKind,
@@ -19,7 +27,7 @@ import {
 import { MAX_COMMENT_LENGTH, MIN_COMMENT_LENGTH } from "~/lib/comments";
 import { MAX_RATING, MIN_RATING } from "~/lib/ratings";
 import { pushHub } from "~/lib/notification-push.server";
-import { checkPppAccess } from "~/lib/ppp";
+import { resolveCourseAccess } from "~/lib/course-access.server";
 
 // ─── Notifications ───
 // The actions that trigger Notifications (posting a question or a reply,
@@ -40,9 +48,15 @@ export type Failure = { ok: false; status: 400 | 403 | 404; error: string };
 
 type Comment = typeof comments.$inferSelect;
 
-function getCourseForLesson(db: Queryable, lessonId: number) {
+/** The course a lesson belongs to, or undefined if the lesson is gone. */
+export function getCourseForLesson(db: Queryable, lessonId: number) {
   return db
-    .select({ courseId: courses.id, instructorId: courses.instructorId })
+    .select({
+      courseId: courses.id,
+      courseTitle: courses.title,
+      courseSlug: courses.slug,
+      instructorId: courses.instructorId,
+    })
     .from(lessons)
     .innerJoin(modules, eq(lessons.moduleId, modules.id))
     .innerJoin(courses, eq(modules.courseId, courses.id))
@@ -77,58 +91,72 @@ type NotificationEvent = Omit<
 
 /**
  * Creates one Notification per recipient for an event, inside the caller's
- * transaction. Nobody is notified about their own action, and nobody twice.
- * Returns who was notified.
+ * transaction. Nobody is notified about their own action, nobody twice, and
+ * never a Platform Admin. Returns the ids of the Notifications created, for
+ * the caller to nudge once its transaction has committed.
  */
 function notify(
   tx: Queryable,
   recipientIds: number[],
   event: NotificationEvent
 ): number[] {
-  const recipients = [...new Set(recipientIds)].filter(
+  const candidates = [...new Set(recipientIds)].filter(
     (id) => id !== event.actorId
   );
-  if (recipients.length > 0) {
-    const created = tx
-      .insert(notifications)
-      .values(recipients.map((recipientId) => ({ ...event, recipientId })))
-      .returning({ id: notifications.id })
-      .all();
-    nudgeAfterCommit(
-      tx,
-      created.map(({ id }) => id)
-    );
-  }
-  return recipients;
+  if (candidates.length === 0) return [];
+
+  const recipients = tx
+    .select({ id: users.id })
+    .from(users)
+    .where(and(inArray(users.id, candidates), ne(users.role, UserRole.Admin)))
+    .all()
+    .map(({ id }) => id);
+  if (recipients.length === 0) return [];
+
+  return tx
+    .insert(notifications)
+    .values(recipients.map((recipientId) => ({ ...event, recipientId })))
+    .returning({ id: notifications.id })
+    .all()
+    .map(({ id }) => id);
 }
 
 // ─── Nudging recipients ───
 
 /**
- * Nudges the recipients of newly created Notifications once the write that
- * created them has committed (ADR 0013). SQLite transactions here are
- * synchronous, so by the time queued work runs every transaction has either
- * committed or rolled back. Only Notifications that still exist are nudged,
- * so a rolled-back write nudges nobody, however deeply it was nested.
+ * Nudges the recipients of newly created Notifications (ADR 0013). Writers
+ * call it after `db.transaction(...)` has returned, so only committed
+ * Notifications are nudged: a write that rolls back never gets here.
  */
-function nudgeAfterCommit(db: Queryable, notificationIds: number[]) {
-  queueMicrotask(() => {
-    try {
-      const rows = selectNotifications(db)
-        .where(inArray(notifications.id, notificationIds))
-        .all();
-      for (const row of rows) {
-        const view = toView(row);
-        pushHub.publish([row.notification.recipientId], {
-          title: view.title,
-          courseTitle: view.courseTitle,
-        });
-      }
-    } catch (error) {
-      // A nudge is only a hint to refetch; the Notification is stored.
-      console.error("Could not nudge Notification recipients", error);
+function nudge(db: Db, notificationIds: number[]) {
+  if (notificationIds.length === 0) return;
+  try {
+    const rows = selectNotifications(db)
+      .where(inArray(notifications.id, notificationIds))
+      .all();
+    for (const row of rows) {
+      const view = toView(row);
+      pushHub.publish([row.notification.recipientId], {
+        title: view.title,
+        courseTitle: view.courseTitle,
+      });
     }
-  });
+  } catch (error) {
+    // A nudge is only a hint to refetch; the Notification is stored.
+    console.error("Could not nudge Notification recipients", error);
+  }
+}
+
+/**
+ * Runs a write in its own transaction, collecting the Notifications it
+ * creates, and nudges their recipients once the transaction has committed.
+ * Writers must not be called inside another transaction.
+ */
+function writeAndNudge<T>(db: Db, write: (tx: Tx, notified: number[]) => T): T {
+  const notified: number[] = [];
+  const result = db.transaction((tx) => write(tx, notified));
+  nudge(db, notified);
+  return result;
 }
 
 // ─── Posting a question or a reply ───
@@ -184,7 +212,7 @@ export function postComment(
     }
   }
 
-  return db.transaction((tx): PostCommentResult => {
+  return writeAndNudge(db, (tx, notified): PostCommentResult => {
     const comment = tx
       .insert(comments)
       .values({ userId: authorId, lessonId, parentId, body: trimmed })
@@ -192,21 +220,25 @@ export function postComment(
       .get();
 
     if (parentId === null) {
-      notify(tx, [course.instructorId], {
-        kind: NotificationKind.NewQuestion,
-        actorId: authorId,
-        courseId: course.courseId,
-        lessonId,
-        commentId: comment.id,
-      });
+      notified.push(
+        ...notify(tx, [course.instructorId], {
+          kind: NotificationKind.NewQuestion,
+          actorId: authorId,
+          courseId: course.courseId,
+          lessonId,
+          commentId: comment.id,
+        })
+      );
     } else {
-      notify(tx, threadParticipantIds(tx, parentId), {
-        kind: NotificationKind.Reply,
-        actorId: authorId,
-        courseId: course.courseId,
-        lessonId,
-        commentId: comment.id,
-      });
+      notified.push(
+        ...notify(tx, threadParticipantIds(tx, parentId), {
+          kind: NotificationKind.Reply,
+          actorId: authorId,
+          courseId: course.courseId,
+          lessonId,
+          commentId: comment.id,
+        })
+      );
     }
 
     return { ok: true, comment };
@@ -261,7 +293,7 @@ export function deletePost(
     return { ok: true, comment: existing };
   }
 
-  return db.transaction((tx): DeletePostResult => {
+  return writeAndNudge(db, (tx, notified): DeletePostResult => {
     const comment = tx
       .update(comments)
       .set({ deletedAt: new Date().toISOString() })
@@ -270,7 +302,7 @@ export function deletePost(
       .get();
 
     if (course) {
-      notifyPostDeleted(tx, comment, course, deleterId);
+      notified.push(...notifyPostDeleted(tx, comment, course, deleterId));
     }
 
     return { ok: true, comment };
@@ -295,14 +327,14 @@ function notifyPostDeleted(
   comment: Comment,
   course: { courseId: number; instructorId: number },
   deleterId: number
-) {
+): number[] {
   const lesson = tx
     .select({ title: lessons.title })
     .from(lessons)
     .where(eq(lessons.id, comment.lessonId))
     .get();
 
-  notify(tx, [comment.userId], {
+  return notify(tx, [comment.userId], {
     kind: NotificationKind.PostDeleted,
     actorId: deleterId,
     courseId: course.courseId,
@@ -364,19 +396,21 @@ export function rateCourse(
     return { ok: true, rating };
   }
 
-  return db.transaction((tx): RateCourseResult => {
+  return writeAndNudge(db, (tx, notified): RateCourseResult => {
     const rating = tx
       .insert(courseRatings)
       .values({ userId: raterId, courseId, rating: stars })
       .returning()
       .get();
 
-    notify(tx, [course.instructorId], {
-      kind: NotificationKind.NewRating,
-      actorId: raterId,
-      courseId,
-      ratingId: rating.id,
-    });
+    notified.push(
+      ...notify(tx, [course.instructorId], {
+        kind: NotificationKind.NewRating,
+        actorId: raterId,
+        courseId,
+        ratingId: rating.id,
+      })
+    );
 
     return { ok: true, rating };
   });
@@ -412,7 +446,7 @@ export function changeCourseStatus(
     };
   }
 
-  return db.transaction((tx): ChangeCourseStatusResult => {
+  return writeAndNudge(db, (tx, notified): ChangeCourseStatusResult => {
     const course = tx
       .update(courses)
       .set({ status, updatedAt: new Date().toISOString() })
@@ -421,13 +455,15 @@ export function changeCourseStatus(
       .get();
 
     if (existing.status !== status) {
-      notify(tx, [existing.instructorId], {
-        kind: NotificationKind.CourseStatusChanged,
-        actorId: changerId,
-        courseId,
-        fromStatus: existing.status,
-        toStatus: status,
-      });
+      notified.push(
+        ...notify(tx, [existing.instructorId], {
+          kind: NotificationKind.CourseStatusChanged,
+          actorId: changerId,
+          courseId,
+          fromStatus: existing.status,
+          toStatus: status,
+        })
+      );
     }
 
     return { ok: true, course };
@@ -505,7 +541,7 @@ function describeNotification(
       };
     case NotificationKind.PostDeleted:
       return {
-        title: `${actorName} removed your post on "${notification.lessonTitle}"`,
+        title: `${actorName} deleted your post on "${notification.lessonTitle}"`,
         excerpt: notification.excerpt,
       };
     case NotificationKind.Reply:
@@ -619,45 +655,6 @@ function clickTarget(row: NotificationRow): ClickTarget {
 }
 
 /**
- * May this user read the course's content, by the lesson page's rules
- * (`getAccess` in access.server.ts)? Staff always can; Students need an
- * enrollment that isn't PPP-blocked from the country they are in now.
- */
-function canViewCourseContent(
-  db: Queryable,
-  userId: number,
-  courseId: number,
-  country: string | null
-): boolean {
-  const course = getCourse(db, courseId);
-  if (!course) return false;
-  if (course.instructorId === userId || isPlatformAdmin(db, userId)) {
-    return true;
-  }
-
-  const enrollment = db
-    .select({ id: enrollments.id })
-    .from(enrollments)
-    .where(
-      and(eq(enrollments.userId, userId), eq(enrollments.courseId, courseId))
-    )
-    .get();
-  if (!enrollment) return false;
-
-  const purchase = db
-    .select({ country: purchases.country })
-    .from(purchases)
-    .where(and(eq(purchases.userId, userId), eq(purchases.courseId, courseId)))
-    .get();
-  return !checkPppAccess(
-    course.price,
-    course.pppEnabled,
-    purchase?.country ?? null,
-    country
-  ).blocked;
-}
-
-/**
  * Marks one of a recipient's Notifications read and works out where clicking
  * it leads, checked at that moment: a link into a course they can no longer
  * see is "unavailable". `country` is where they are now (for PPP), as
@@ -690,7 +687,8 @@ export function resolveNotificationClick(
   const target = clickTarget(row);
   if (
     target.type === "url" &&
-    !canViewCourseContent(db, recipientId, row.notification.courseId, country)
+    !resolveCourseAccess(db, recipientId, row.notification.courseId, country)
+      ?.canViewContent
   ) {
     return { ok: true, target: { type: "unavailable" } };
   }
@@ -704,16 +702,18 @@ export function countUnreadNotifications(
   db: Queryable,
   recipientId: number
 ): number {
-  return db
-    .select({ n: count() })
-    .from(notifications)
-    .where(
-      and(
-        eq(notifications.recipientId, recipientId),
-        isNull(notifications.readAt)
+  return (
+    db
+      .select({ n: count() })
+      .from(notifications)
+      .where(
+        and(
+          eq(notifications.recipientId, recipientId),
+          isNull(notifications.readAt)
+        )
       )
-    )
-    .get()!.n;
+      .get()?.n ?? 0
+  );
 }
 
 // ─── Managing Notifications ───
@@ -801,11 +801,8 @@ export function listNotificationsPage(
   page: number
 ): NotificationsPage {
   const where = matchingFilter(recipientId, filter);
-  const total = db
-    .select({ n: count() })
-    .from(notifications)
-    .where(where)
-    .get()!.n;
+  const total =
+    db.select({ n: count() }).from(notifications).where(where).get()?.n ?? 0;
   const pageCount = Math.max(1, Math.ceil(total / NOTIFICATIONS_PAGE_SIZE));
   const shown = Math.min(Math.max(1, Math.floor(page) || 1), pageCount);
 
@@ -913,7 +910,10 @@ export function markNotificationsRead(
     .update(notifications)
     .set({ readAt: now.toISOString() })
     .where(
-      and(ownedAmong(notificationIds, recipientId), isNull(notifications.readAt))
+      and(
+        ownedAmong(notificationIds, recipientId),
+        isNull(notifications.readAt)
+      )
     )
     .returning({ id: notifications.id })
     .all();

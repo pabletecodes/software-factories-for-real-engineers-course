@@ -10,7 +10,11 @@ import {
   type RenderedComment,
 } from "~/components/comment-thread";
 import { MIN_COMMENT_LENGTH, MAX_COMMENT_LENGTH } from "~/lib/comments";
-import { deletePost, postComment } from "~/lib/notifications.server";
+import {
+  deletePost,
+  getCourseForLesson,
+  postComment,
+} from "~/lib/notifications.server";
 import { db } from "~/db";
 import {
   categories,
@@ -309,21 +313,6 @@ function calculateWatchProgress(
   return Math.min(Math.round((maxPosition / videoDurationSeconds) * 100), 100);
 }
 
-function getCourseForLesson(lessonId: number) {
-  return db
-    .select({
-      courseId: courses.id,
-      courseTitle: courses.title,
-      courseSlug: courses.slug,
-      instructorId: courses.instructorId,
-    })
-    .from(lessons)
-    .innerJoin(modules, eq(lessons.moduleId, modules.id))
-    .innerJoin(courses, eq(modules.courseId, courses.id))
-    .where(eq(lessons.id, lessonId))
-    .get();
-}
-
 function getCommentById(commentId: number) {
   return db.select().from(comments).where(eq(comments.id, commentId)).get();
 }
@@ -342,7 +331,7 @@ function assertValidBody(body: string) {
 }
 
 function getLessonThread(lessonId: number): ThreadComment[] {
-  const course = getCourseForLesson(lessonId);
+  const course = getCourseForLesson(db, lessonId);
   if (!course) return [];
 
   const rows = db
@@ -856,7 +845,7 @@ export async function action({ params, request }: Route.ActionArgs) {
           parsed.data.body
         );
         if (!result.ok) {
-          return { ok: false, error: result.error };
+          throw data(result.error, { status: result.status });
         }
         return { ok: true };
       }
@@ -886,7 +875,7 @@ export async function action({ params, request }: Route.ActionArgs) {
       }
       const result = deletePost(db, parsed.data.commentId, currentUserId);
       if (!result.ok) {
-        return { ok: false, error: result.error };
+        throw data(result.error, { status: result.status });
       }
       return { ok: true };
     } catch (error) {

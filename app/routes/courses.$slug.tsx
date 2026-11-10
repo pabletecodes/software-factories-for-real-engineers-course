@@ -443,7 +443,7 @@ export async function action({ params, request }: Route.ActionArgs) {
 
   const result = rateCourse(db, currentUserId, course.id, parsed.data.rating);
   if (!result.ok) {
-    return { ok: false as const, error: result.error };
+    throw data(result.error, { status: result.status });
   }
 
   return { ok: true as const, error: null };

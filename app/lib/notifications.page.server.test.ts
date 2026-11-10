@@ -218,7 +218,7 @@ describe("countNotifications", () => {
 });
 
 describe("receivableNotificationKinds", () => {
-  it("gives Students replies and removed posts", () => {
+  it("gives Students replies and deleted posts", () => {
     expect(receivableNotificationKinds(UserRole.Student)).toEqual([
       NotificationKind.Reply,
       NotificationKind.PostDeleted,

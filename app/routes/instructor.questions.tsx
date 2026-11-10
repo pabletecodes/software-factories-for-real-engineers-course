@@ -13,7 +13,7 @@ import { UserAvatar } from "~/components/user-avatar";
 import { AlertTriangle, CheckCircle2, ExternalLink } from "lucide-react";
 import { cn, daysSince, formatRelativeTime } from "~/lib/utils";
 import { MAX_COMMENT_LENGTH } from "~/lib/comments";
-import { postComment } from "~/lib/notifications.server";
+import { getCourseForLesson, postComment } from "~/lib/notifications.server";
 import { parseFormData } from "~/lib/validation";
 import { db } from "~/db";
 import {
@@ -101,21 +101,6 @@ function getCommentById(commentId: number) {
   return db.select().from(comments).where(eq(comments.id, commentId)).get();
 }
 
-function getCourseForLesson(lessonId: number) {
-  return db
-    .select({
-      courseId: courses.id,
-      courseTitle: courses.title,
-      courseSlug: courses.slug,
-      instructorId: courses.instructorId,
-    })
-    .from(lessons)
-    .innerJoin(modules, eq(lessons.moduleId, modules.id))
-    .innerJoin(courses, eq(modules.courseId, courses.id))
-    .where(eq(lessons.id, lessonId))
-    .get();
-}
-
 // A question sitting this long without an answer gets called out visually.
 const STALE_AFTER_DAYS = 3;
 
@@ -158,7 +143,7 @@ export async function action({ request }: Route.ActionArgs) {
     throw data("Question not found", { status: 404 });
   }
 
-  const course = getCourseForLesson(question.lessonId);
+  const course = getCourseForLesson(db, question.lessonId);
   if (!course) {
     throw data("Course not found", { status: 404 });
   }
@@ -169,13 +154,13 @@ export async function action({ request }: Route.ActionArgs) {
 
   const result = postComment(
     db,
-    access.userId!,
+    access.userId,
     question.lessonId,
     question.id,
     parsed.data.body
   );
   if (!result.ok) {
-    return { ok: false, error: result.error };
+    throw data(result.error, { status: result.status });
   }
 
   return { ok: true };

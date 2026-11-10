@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { createTestDb, seedBaseData } from "~/test/setup";
 import * as schema from "~/db/schema";
 import { CourseStatus, NotificationKind, UserRole } from "~/db/schema";
@@ -426,6 +426,15 @@ describe("Notifications for a reply", () => {
     ]);
   });
 
+  it("never notifies a Platform Admin who posted in the thread", () => {
+    const admin = addUser("Admin", UserRole.Admin);
+    const question = post(base.user.id, null);
+    post(admin.id, question.id, "Moderating.");
+    post(base.instructor.id, question.id, "Like this.");
+
+    expect(listLatestNotifications(db, admin.id)).toEqual([]);
+  });
+
   it("leads a click to the reply on its lesson", () => {
     db.insert(schema.enrollments)
       .values({ userId: base.user.id, courseId: base.course.id })
@@ -617,7 +626,8 @@ describe("deleting a lesson that Notifications reference", () => {
       .select()
       .from(schema.lessons)
       .where(eq(schema.lessons.id, lessonId))
-      .get()!;
+      .get();
+    if (!lesson) throw new Error("The lesson should exist");
     db.delete(schema.lessons)
       .where(eq(schema.lessons.moduleId, lesson.moduleId))
       .run();
@@ -760,7 +770,7 @@ describe("Notifications for a deleted post", () => {
       expect.objectContaining({
         kind: NotificationKind.PostDeleted,
         read: false,
-        title: `Test Instructor removed your post on "Lesson 1"`,
+        title: `Test Instructor deleted your post on "Lesson 1"`,
         excerpt: "Why is the sky blue?",
         courseTitle: "Test Course",
       }),
@@ -776,10 +786,19 @@ describe("Notifications for a deleted post", () => {
     expect(listLatestNotifications(db, base.user.id)).toEqual([
       expect.objectContaining({
         kind: NotificationKind.PostDeleted,
-        title: `Admin removed your post on "Lesson 1"`,
+        title: `Admin deleted your post on "Lesson 1"`,
         excerpt: "Is this off-topic?",
       }),
     ]);
+  });
+
+  it("never tells a Platform Admin whose post the Instructor deletes", () => {
+    const admin = addUser("Admin", UserRole.Admin);
+    const question = post(admin.id, null, "An announcement");
+
+    deletePost(db, question.id, base.instructor.id);
+
+    expect(listLatestNotifications(db, admin.id)).toEqual([]);
   });
 
   it("notifies nobody when the author deletes their own post", () => {
@@ -832,7 +851,7 @@ describe("Notifications for a deleted post", () => {
 
     expect(listLatestNotifications(db, base.user.id)).toEqual([
       expect.objectContaining({
-        title: `Test Instructor removed your post on "Lesson 1"`,
+        title: `Test Instructor deleted your post on "Lesson 1"`,
         excerpt: "Off-topic rant",
       }),
     ]);
@@ -853,9 +872,6 @@ describe("Notifications for a deleted post", () => {
 // ─── Real-time arrival (#13) ───
 
 describe("nudging recipients when Notifications arrive", () => {
-  /** Lets work queued for after the current write run. */
-  const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
-
   function listen(userId: number) {
     const received: Nudge[] = [];
     const unsubscribe = pushHub.subscribe(userId, (nudge) => {
@@ -864,12 +880,11 @@ describe("nudging recipients when Notifications arrive", () => {
     return { received, unsubscribe };
   }
 
-  it("nudges the recipient with the Notification's title and course", async () => {
+  it("nudges the recipient with the Notification's title and course once the write commits", () => {
     const instructor = listen(base.instructor.id);
     const student = listen(base.user.id);
 
     postComment(db, base.user.id, lessonId, null, "What is a closure?");
-    await settle();
 
     expect(instructor.received).toEqual([
       { title: "Test User asked a question", courseTitle: "Test Course" },
@@ -879,36 +894,35 @@ describe("nudging recipients when Notifications arrive", () => {
     student.unsubscribe();
   });
 
-  it("nudges the author when staff delete their post", async () => {
+  it("nudges the author when staff delete their post", () => {
     const result = postComment(db, base.user.id, lessonId, null, "Off-topic?");
     if (!result.ok) throw new Error(result.error);
-    await settle();
     const student = listen(base.user.id);
 
     deletePost(db, result.comment.id, base.instructor.id);
-    await settle();
 
     expect(student.received).toEqual([
       {
-        title: `Test Instructor removed your post on "Lesson 1"`,
+        title: `Test Instructor deleted your post on "Lesson 1"`,
         courseTitle: "Test Course",
       },
     ]);
     student.unsubscribe();
   });
 
-  it("does not nudge anyone when the write is rolled back", async () => {
+  it("does not nudge anyone when the write is rolled back", () => {
     const instructor = listen(base.instructor.id);
+    // Make storing the Notification fail, so the whole write rolls back.
+    db.run(
+      sql`CREATE TRIGGER refuse_notifications BEFORE INSERT ON notifications
+          BEGIN SELECT RAISE(ABORT, 'refused'); END`
+    );
 
     expect(() =>
-      db.transaction(() => {
-        postComment(db, base.user.id, lessonId, null, "What is a closure?");
-        throw new Error("roll back");
-      })
-    ).toThrow("roll back");
-    await settle();
+      postComment(db, base.user.id, lessonId, null, "What is a closure?")
+    ).toThrow("refused");
 
-    expect(listLatestNotifications(db, base.instructor.id)).toEqual([]);
+    expect(db.select().from(schema.comments).all()).toEqual([]);
     expect(instructor.received).toEqual([]);
     instructor.unsubscribe();
   });

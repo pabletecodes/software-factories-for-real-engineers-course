@@ -692,7 +692,7 @@ export async function action({ params, request }: Route.ActionArgs) {
       parsed.data.status
     );
     if (!result.ok) {
-      return data({ error: result.error }, { status: result.status });
+      throw data(result.error, { status: result.status });
     }
     return { success: true, field: "status" };
   }

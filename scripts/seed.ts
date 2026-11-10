@@ -2096,12 +2096,12 @@ This course is still in draft while the cluster examples are rewritten against t
   }
 
   // ─── Notifications: deleted posts (ticket #16) ───
-  // Staff removed two Students' posts. Each author is told, with a snapshot of
+  // Staff deleted two Students' posts. Each author is told, with a snapshot of
   // the lesson title and an excerpt; the recent one is still unread.
 
   const deletedPosts = [
     {
-      // An off-topic reply the course's Instructor removed.
+      // An off-topic reply the course's Instructor deleted.
       deleted: comment({
         lessonId: course1LessonIds[0],
         userId: students[0].id,
@@ -2115,7 +2115,7 @@ This course is still in draft while the cluster examples are rewritten against t
       readAt: null,
     },
     {
-      // A duplicate question a Platform Admin removed.
+      // A duplicate question a Platform Admin deleted.
       deleted: comment({
         lessonId: course2LessonIds[0],
         userId: students[1].id,
@@ -2134,7 +2134,10 @@ This course is still in draft while the cluster examples are rewritten against t
       .select({ title: schema.lessons.title })
       .from(schema.lessons)
       .where(eq(schema.lessons.id, deleted.lessonId))
-      .get()!;
+      .get();
+    if (!lesson || deleted.deletedAt === null) {
+      throw new Error("A seeded deleted post needs its lesson and deletedAt");
+    }
     db.insert(schema.notifications)
       .values({
         recipientId: deleted.userId,
@@ -2145,7 +2148,7 @@ This course is still in draft while the cluster examples are rewritten against t
         commentId: deleted.id,
         lessonTitle: lesson.title,
         excerpt: deleted.body,
-        createdAt: deleted.deletedAt!,
+        createdAt: deleted.deletedAt,
         readAt,
       })
       .run();

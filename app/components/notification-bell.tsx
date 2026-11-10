@@ -52,7 +52,7 @@ export const notificationKindMeta: Record<
   [NotificationKind.PostDeleted]: {
     icon: Trash2,
     tint: "text-red-500",
-    label: "Removed posts",
+    label: "Deleted posts",
   },
   [NotificationKind.NewQuestion]: {
     icon: HelpCircle,
@@ -128,16 +128,18 @@ const NOTIFICATIONS_ACTION = "/api/notifications";
  * the badge and list change straight away rather than after the round trip.
  */
 function useOptimisticBellData(data: NotificationBellData) {
-  const pending = useFetchers().filter(
-    (fetcher) => fetcher.formAction === NOTIFICATIONS_ACTION && fetcher.formData
+  const pending = useFetchers().flatMap((fetcher) =>
+    fetcher.formAction === NOTIFICATIONS_ACTION && fetcher.formData
+      ? [fetcher.formData]
+      : []
   );
   const deletingIds = new Set(
     pending
-      .filter((fetcher) => fetcher.formData!.get("intent") === "delete")
-      .map((fetcher) => Number(fetcher.formData!.get("notificationId")))
+      .filter((formData) => formData.get("intent") === "delete")
+      .map((formData) => Number(formData.get("notificationId")))
   );
   const markingAllRead = pending.some(
-    (fetcher) => fetcher.formData!.get("intent") === "mark-all-read"
+    (formData) => formData.get("intent") === "mark-all-read"
   );
 
   const latest = data.latest

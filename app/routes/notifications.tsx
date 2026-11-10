@@ -8,6 +8,7 @@ import {
 } from "react-router";
 import { AlertTriangle, CheckCheck, Trash2 } from "lucide-react";
 import { eq } from "drizzle-orm";
+import { z } from "zod";
 import type { Route } from "./+types/notifications";
 import { db } from "~/db";
 import { NotificationKind, users } from "~/db/schema";
@@ -41,6 +42,20 @@ export function meta() {
 
 const NOTIFICATIONS_ACTION = "/api/notifications";
 
+/**
+ * The page's search params. Anything unrecognised falls back to the default:
+ * no kind filter, all Notifications, page 1.
+ */
+const notificationsSearchSchema = z.object({
+  kind: z.nativeEnum(NotificationKind).nullable().catch(null),
+  unread: z
+    .literal("1")
+    .optional()
+    .catch(undefined)
+    .transform((unread) => unread === "1"),
+  page: z.coerce.number().int().positive().catch(1),
+});
+
 export async function loader({ request }: Route.LoaderArgs) {
   const userId = await requireUserId(request);
   const user = db
@@ -55,13 +70,14 @@ export async function loader({ request }: Route.LoaderArgs) {
     });
   }
 
-  const params = new URL(request.url).searchParams;
-  const kindParam = params.get("kind") as NotificationKind | null;
+  const search = notificationsSearchSchema.parse(
+    Object.fromEntries(new URL(request.url).searchParams)
+  );
   const filter: NotificationFilter = {
-    unreadOnly: params.get("unread") === "1",
-    kind: kindParam && kinds.includes(kindParam) ? kindParam : null,
+    unreadOnly: search.unread,
+    kind: search.kind && kinds.includes(search.kind) ? search.kind : null,
   };
-  const page = Number(params.get("page") ?? "1");
+  const page = search.page;
 
   return {
     kinds,
@@ -407,7 +423,8 @@ function NotificationTableRow({
 
 export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
   let title = "Something went wrong";
-  let message = "An unexpected error occurred while loading your Notifications.";
+  let message =
+    "An unexpected error occurred while loading your Notifications.";
 
   if (isRouteErrorResponse(error)) {
     title =
