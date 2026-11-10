@@ -96,5 +96,5 @@ _Avoid_: Watch cap, Viewing threshold
 ### Notifications
 
 **Notification**:
-A message inside Cadence telling one Student or Instructor about one thing that happened. It is unread until they open or dismiss it.
-_Avoid_: Alert, Message, Activity
+A message inside Cadence telling one Student or Instructor about one thing that happened. It is unread until they open it or mark it as read, and stays until they delete it.
+_Avoid_: Alert, Message, Activity, Dismiss
