@@ -225,14 +225,56 @@ export function deletePost(
     return { ok: true, comment: existing };
   }
 
-  const comment = db
-    .update(comments)
-    .set({ deletedAt: new Date().toISOString() })
-    .where(eq(comments.id, commentId))
-    .returning()
+  return db.transaction((tx): DeletePostResult => {
+    const comment = tx
+      .update(comments)
+      .set({ deletedAt: new Date().toISOString() })
+      .where(eq(comments.id, commentId))
+      .returning()
+      .get();
+
+    if (course) {
+      notifyPostDeleted(tx, comment, course, deleterId);
+    }
+
+    return { ok: true, comment };
+  });
+}
+
+/** How much of a deleted post its Notification keeps. */
+export const DELETED_POST_EXCERPT_LENGTH = 200;
+
+function excerptOf(body: string) {
+  return body.length > DELETED_POST_EXCERPT_LENGTH
+    ? `${body.slice(0, DELETED_POST_EXCERPT_LENGTH - 1)}…`
+    : body;
+}
+
+/**
+ * Tells a post's author that someone else deleted it. The lesson title and an
+ * excerpt are kept on the Notification, as the post and lesson may not last.
+ */
+function notifyPostDeleted(
+  tx: Queryable,
+  comment: Comment,
+  course: { courseId: number; instructorId: number },
+  deleterId: number
+) {
+  const lesson = tx
+    .select({ title: lessons.title })
+    .from(lessons)
+    .where(eq(lessons.id, comment.lessonId))
     .get();
 
-  return { ok: true, comment };
+  notify(tx, [comment.userId], {
+    kind: NotificationKind.PostDeleted,
+    actorId: deleterId,
+    courseId: course.courseId,
+    lessonId: comment.lessonId,
+    commentId: comment.id,
+    lessonTitle: lesson?.title ?? null,
+    excerpt: excerptOf(comment.body),
+  });
 }
 
 // ─── Rating a course ───
@@ -425,6 +467,11 @@ function describeNotification(
         title: `${actorName} moved your course from ${statusLabel(notification.fromStatus)} to ${statusLabel(notification.toStatus)}`,
         excerpt: null,
       };
+    case NotificationKind.PostDeleted:
+      return {
+        title: `${actorName} removed your post on "${notification.lessonTitle}"`,
+        excerpt: notification.excerpt,
+      };
     case NotificationKind.Reply:
       return {
         title:
@@ -520,6 +567,9 @@ function clickTarget(row: NotificationRow): ClickTarget {
     case NotificationKind.NewQuestion:
     case NotificationKind.Reply:
       return commentTarget(row);
+    case NotificationKind.PostDeleted:
+      // The post is gone, so there is nothing to show.
+      return { type: "stay" };
     case NotificationKind.NewRating:
       return {
         type: "url",

@@ -2095,6 +2095,62 @@ This course is still in draft while the cluster examples are rewritten against t
     }
   }
 
+  // ─── Notifications: deleted posts (ticket #16) ───
+  // Staff removed two Students' posts. Each author is told, with a snapshot of
+  // the lesson title and an excerpt; the recent one is still unread.
+
+  const deletedPosts = [
+    {
+      // An off-topic reply the course's Instructor removed.
+      deleted: comment({
+        lessonId: course1LessonIds[0],
+        userId: students[0].id,
+        parentId: c1q5.id,
+        body: "Honestly just skip this course and watch YouTube instead, it's free.",
+        createdAt: daysAgo(3),
+        deletedAt: daysAgo(2),
+      }),
+      deleterId: instructor1.id,
+      courseId: course1.id,
+      readAt: null,
+    },
+    {
+      // A duplicate question a Platform Admin removed.
+      deleted: comment({
+        lessonId: course2LessonIds[0],
+        userId: students[1].id,
+        body: "Are the example requests real or mocked? (Sorry if this was asked already.)",
+        createdAt: daysAgo(20),
+        deletedAt: daysAgo(19),
+      }),
+      deleterId: admin.id,
+      courseId: course2.id,
+      readAt: daysAgo(18),
+    },
+  ];
+
+  for (const { deleted, deleterId, courseId, readAt } of deletedPosts) {
+    const lesson = db
+      .select({ title: schema.lessons.title })
+      .from(schema.lessons)
+      .where(eq(schema.lessons.id, deleted.lessonId))
+      .get()!;
+    db.insert(schema.notifications)
+      .values({
+        recipientId: deleted.userId,
+        actorId: deleterId,
+        kind: NotificationKind.PostDeleted,
+        courseId,
+        lessonId: deleted.lessonId,
+        commentId: deleted.id,
+        lessonTitle: lesson.title,
+        excerpt: deleted.body,
+        createdAt: deleted.deletedAt!,
+        readAt,
+      })
+      .run();
+  }
+
   console.log(
     `Created ${countRows(schema.notifications)} notifications (${countRows(schema.notifications, isNull(schema.notifications.readAt))} unread).`
   );
