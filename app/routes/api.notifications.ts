@@ -2,6 +2,7 @@ import { data } from "react-router";
 import { z } from "zod";
 import type { Route } from "./+types/api.notifications";
 import { db } from "~/db";
+import { resolveCountry } from "~/lib/country.server";
 import { getCurrentUserId } from "~/lib/session";
 import { parseFormData } from "~/lib/validation";
 import { resolveNotificationClick } from "~/lib/notifications.server";
@@ -35,7 +36,9 @@ export async function action({ request }: Route.ActionArgs) {
       const result = resolveNotificationClick(
         db,
         parsed.data.notificationId,
-        userId
+        userId,
+        new Date(),
+        await resolveCountry(request)
       );
       if (!result.ok) {
         throw data(result.error, { status: result.status });
