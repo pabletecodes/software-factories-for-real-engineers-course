@@ -12,6 +12,7 @@ import {
   rateCourse,
   resolveNotificationClick,
 } from "./notifications.server";
+import { pushHub, type Nudge } from "./notification-push.server";
 
 type TestDb = ReturnType<typeof createTestDb>;
 
@@ -846,5 +847,69 @@ describe("Notifications for a deleted post", () => {
       { ok: true, target: { type: "stay" } }
     );
     expect(countUnreadNotifications(db, base.user.id)).toBe(0);
+  });
+});
+
+// ─── Real-time arrival (#13) ───
+
+describe("nudging recipients when Notifications arrive", () => {
+  /** Lets work queued for after the current write run. */
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+  function listen(userId: number) {
+    const received: Nudge[] = [];
+    const unsubscribe = pushHub.subscribe(userId, (nudge) => {
+      received.push(nudge);
+    });
+    return { received, unsubscribe };
+  }
+
+  it("nudges the recipient with the Notification's title and course", async () => {
+    const instructor = listen(base.instructor.id);
+    const student = listen(base.user.id);
+
+    postComment(db, base.user.id, lessonId, null, "What is a closure?");
+    await settle();
+
+    expect(instructor.received).toEqual([
+      { title: "Test User asked a question", courseTitle: "Test Course" },
+    ]);
+    expect(student.received).toEqual([]);
+    instructor.unsubscribe();
+    student.unsubscribe();
+  });
+
+  it("nudges the author when staff delete their post", async () => {
+    const result = postComment(db, base.user.id, lessonId, null, "Off-topic?");
+    if (!result.ok) throw new Error(result.error);
+    await settle();
+    const student = listen(base.user.id);
+
+    deletePost(db, result.comment.id, base.instructor.id);
+    await settle();
+
+    expect(student.received).toEqual([
+      {
+        title: `Test Instructor removed your post on "Lesson 1"`,
+        courseTitle: "Test Course",
+      },
+    ]);
+    student.unsubscribe();
+  });
+
+  it("does not nudge anyone when the write is rolled back", async () => {
+    const instructor = listen(base.instructor.id);
+
+    expect(() =>
+      db.transaction(() => {
+        postComment(db, base.user.id, lessonId, null, "What is a closure?");
+        throw new Error("roll back");
+      })
+    ).toThrow("roll back");
+    await settle();
+
+    expect(listLatestNotifications(db, base.instructor.id)).toEqual([]);
+    expect(instructor.received).toEqual([]);
+    instructor.unsubscribe();
   });
 });
