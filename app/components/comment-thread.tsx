@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { useFetcher } from "react-router";
+import { createContext, useContext, useEffect, useState } from "react";
+import { useFetcher, useLocation } from "react-router";
 import { toast } from "sonner";
 import { MessageSquare, Pencil, Reply, Trash2 } from "lucide-react";
 import { Button } from "~/components/ui/button";
@@ -28,6 +28,51 @@ export type RenderedComment = {
   };
   replies: RenderedComment[];
 };
+
+// ─── Anchors ───
+// Every comment has a stable `comment-<id>` DOM id, so a link such as a
+// Notification's can land on it. Arriving with that hash scrolls the comment
+// into view and highlights it briefly.
+
+const HIGHLIGHT_MS = 2500;
+
+const HighlightedCommentContext = createContext<number | null>(null);
+
+function commentIdFromHash(hash: string): number | null {
+  const match = /^#comment-(\d+)$/.exec(hash);
+  return match ? Number(match[1]) : null;
+}
+
+/** Scrolls to and briefly highlights the comment named in the URL hash. */
+function useHighlightedComment(): number | null {
+  const { hash, key } = useLocation();
+  const [highlighted, setHighlighted] = useState<number | null>(null);
+
+  useEffect(() => {
+    const commentId = commentIdFromHash(hash);
+    if (commentId === null) return;
+    const element = document.getElementById(`comment-${commentId}`);
+    if (!element) return;
+
+    element.scrollIntoView({ behavior: "smooth", block: "center" });
+    setHighlighted(commentId);
+    const timeout = setTimeout(() => setHighlighted(null), HIGHLIGHT_MS);
+    return () => clearTimeout(timeout);
+  }, [hash, key]);
+
+  return highlighted;
+}
+
+function useCommentAnchor(commentId: number) {
+  const highlighted = useContext(HighlightedCommentContext) === commentId;
+  return {
+    id: `comment-${commentId}`,
+    className: cn(
+      "scroll-mt-4 rounded-md transition-colors duration-700",
+      highlighted && "bg-amber-100/70 dark:bg-amber-900/30"
+    ),
+  };
+}
 
 function AuthorBadge({ label }: { label: string }) {
   return (
@@ -100,7 +145,11 @@ function CommentForm({
       />
 
       <div className="flex items-center gap-3">
-        <Button type="submit" size="sm" disabled={submitting || empty || tooLong}>
+        <Button
+          type="submit"
+          size="sm"
+          disabled={submitting || empty || tooLong}
+        >
           {submitting ? "Posting..." : submitLabel}
         </Button>
 
@@ -206,11 +255,14 @@ function CommentItem({
   const [editing, setEditing] = useState(false);
   const [replying, setReplying] = useState(false);
 
-  const isAuthor = currentUserId !== null && comment.author.id === currentUserId;
+  const isAuthor =
+    currentUserId !== null && comment.author.id === currentUserId;
+
+  const anchor = useCommentAnchor(comment.id);
 
   if (comment.deleted) {
     return (
-      <div className="py-3">
+      <div {...anchor} className={cn("py-3", anchor.className)}>
         <p className="text-sm italic text-muted-foreground">
           This comment was deleted.
         </p>
@@ -225,7 +277,10 @@ function CommentItem({
   }
 
   return (
-    <div className={cn("py-3", isReply && "border-l pl-4")}>
+    <div
+      {...anchor}
+      className={cn("py-3", isReply && "border-l pl-4", anchor.className)}
+    >
       <div className="flex items-start gap-3">
         <UserAvatar
           name={comment.author.name}
@@ -352,47 +407,53 @@ export function CommentThread({
   canPost: boolean;
   instructorName: string;
 }) {
+  const highlighted = useHighlightedComment();
+
   return (
-    <Card className="mb-8">
-      <CardContent className="p-6">
-        <div className="mb-4 flex items-center gap-2">
-          <MessageSquare className="size-5 text-primary" />
-          <h2 className="text-xl font-semibold">Questions &amp; Discussion</h2>
-        </div>
-
-        {comments.length === 0 ? (
-          <div className="rounded-lg border border-dashed p-6 text-center">
-            <p className="font-medium">Stuck on this lesson?</p>
-            <p className="mt-1 text-sm text-muted-foreground">
-              Ask here — {instructorName} answers questions in this course.
-              There&apos;s no such thing as a question that&apos;s too basic.
-            </p>
+    <HighlightedCommentContext.Provider value={highlighted}>
+      <Card className="mb-8">
+        <CardContent className="p-6">
+          <div className="mb-4 flex items-center gap-2">
+            <MessageSquare className="size-5 text-primary" />
+            <h2 className="text-xl font-semibold">
+              Questions &amp; Discussion
+            </h2>
           </div>
-        ) : (
-          <div className="divide-y">
-            {comments.map((comment) => (
-              <CommentItem
-                key={comment.id}
-                comment={comment}
-                currentUserId={currentUserId}
-                canModerate={canModerate}
-                canPost={canPost}
-                isReply={false}
+
+          {comments.length === 0 ? (
+            <div className="rounded-lg border border-dashed p-6 text-center">
+              <p className="font-medium">Stuck on this lesson?</p>
+              <p className="mt-1 text-sm text-muted-foreground">
+                Ask here — {instructorName} answers questions in this course.
+                There&apos;s no such thing as a question that&apos;s too basic.
+              </p>
+            </div>
+          ) : (
+            <div className="divide-y">
+              {comments.map((comment) => (
+                <CommentItem
+                  key={comment.id}
+                  comment={comment}
+                  currentUserId={currentUserId}
+                  canModerate={canModerate}
+                  canPost={canPost}
+                  isReply={false}
+                />
+              ))}
+            </div>
+          )}
+
+          {canPost && (
+            <div className="mt-6 border-t pt-6">
+              <CommentForm
+                intent="create-comment"
+                placeholder="Ask a question or share what you found..."
+                submitLabel="Post comment"
               />
-            ))}
-          </div>
-        )}
-
-        {canPost && (
-          <div className="mt-6 border-t pt-6">
-            <CommentForm
-              intent="create-comment"
-              placeholder="Ask a question or share what you found..."
-              submitLabel="Post comment"
-            />
-          </div>
-        )}
-      </CardContent>
-    </Card>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+    </HighlightedCommentContext.Provider>
   );
 }

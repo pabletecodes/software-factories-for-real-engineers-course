@@ -357,7 +357,10 @@ function describeNotification(
   const { notification, actorName } = row;
   switch (notification.kind) {
     case NotificationKind.NewQuestion:
-      return { title: `${actorName} asked a question`, excerpt: row.commentBody };
+      return {
+        title: `${actorName} asked a question`,
+        excerpt: row.commentBody,
+      };
     default:
       return { title: "Notification", excerpt: notification.excerpt };
   }
@@ -397,9 +400,7 @@ export function listLatestNotifications(
  * UI stays put and says it is no longer available.
  */
 export type ClickTarget =
-  | { type: "url"; url: string }
-  | { type: "stay" }
-  | { type: "unavailable" };
+  { type: "url"; url: string } | { type: "stay" } | { type: "unavailable" };
 
 export type ResolveClickResult = { ok: true; target: ClickTarget } | Failure;
 

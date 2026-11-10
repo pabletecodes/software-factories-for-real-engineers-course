@@ -70,7 +70,9 @@ describe("postComment", () => {
     expect(
       postComment(db, base.user.id, lessonId, null, "a".repeat(5000)).ok
     ).toBe(true);
-    expect(postComment(db, base.user.id, lessonId, null, "a".repeat(5001))).toEqual({
+    expect(
+      postComment(db, base.user.id, lessonId, null, "a".repeat(5001))
+    ).toEqual({
       ok: false,
       status: 400,
       error: "Comment must be 5000 characters or fewer",
@@ -120,7 +122,9 @@ describe("postComment", () => {
     it("refuses a parent on a different lesson", () => {
       const question = askQuestion(otherLessonId);
 
-      expect(postComment(db, base.user.id, lessonId, question.id, "Hi")).toEqual({
+      expect(
+        postComment(db, base.user.id, lessonId, question.id, "Hi")
+      ).toEqual({
         ok: false,
         status: 400,
         error: "Parent comment belongs to a different lesson",
@@ -129,7 +133,13 @@ describe("postComment", () => {
 
     it("refuses a reply to a reply", () => {
       const question = askQuestion();
-      const reply = postComment(db, base.user.id, lessonId, question.id, "Me too");
+      const reply = postComment(
+        db,
+        base.user.id,
+        lessonId,
+        question.id,
+        "Me too"
+      );
       if (!reply.ok) throw new Error(reply.error);
 
       expect(
