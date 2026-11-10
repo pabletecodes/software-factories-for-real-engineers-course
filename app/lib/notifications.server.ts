@@ -1,7 +1,14 @@
 import { eq } from "drizzle-orm";
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import * as schema from "~/db/schema";
-import { comments, courses, lessons, modules } from "~/db/schema";
+import {
+  comments,
+  courses,
+  lessons,
+  modules,
+  users,
+  UserRole,
+} from "~/db/schema";
 import { MAX_COMMENT_LENGTH, MIN_COMMENT_LENGTH } from "~/lib/comments";
 
 // ─── Notifications ───
@@ -27,6 +34,15 @@ function getCourseForLesson(db: Db, lessonId: number) {
     .innerJoin(courses, eq(modules.courseId, courses.id))
     .where(eq(lessons.id, lessonId))
     .get();
+}
+
+function isPlatformAdmin(db: Db, userId: number) {
+  const user = db
+    .select({ role: users.role })
+    .from(users)
+    .where(eq(users.id, userId))
+    .get();
+  return user?.role === UserRole.Admin;
 }
 
 function getComment(db: Db, commentId: number) {
@@ -88,6 +104,51 @@ export function postComment(
   const comment = db
     .insert(comments)
     .values({ userId: authorId, lessonId, parentId, body: trimmed })
+    .returning()
+    .get();
+
+  return { ok: true, comment };
+}
+
+// ─── Deleting a post ───
+
+export type DeletePostResult = { ok: true; comment: Comment } | Failure;
+
+/**
+ * Soft-deletes a question or reply. Its author may delete it, and so may staff:
+ * the course's Instructor or a Platform Admin. Deleting a post that is already
+ * deleted changes nothing.
+ */
+export function deletePost(
+  db: Db,
+  commentId: number,
+  deleterId: number
+): DeletePostResult {
+  const existing = getComment(db, commentId);
+  if (!existing) {
+    return { ok: false, status: 404, error: "Comment not found" };
+  }
+
+  const course = getCourseForLesson(db, existing.lessonId);
+  const isStaff =
+    course?.instructorId === deleterId || isPlatformAdmin(db, deleterId);
+
+  if (existing.userId !== deleterId && !isStaff) {
+    return {
+      ok: false,
+      status: 403,
+      error: "You can only delete your own comments",
+    };
+  }
+
+  if (existing.deletedAt !== null) {
+    return { ok: true, comment: existing };
+  }
+
+  const comment = db
+    .update(comments)
+    .set({ deletedAt: new Date().toISOString() })
+    .where(eq(comments.id, commentId))
     .returning()
     .get();
 

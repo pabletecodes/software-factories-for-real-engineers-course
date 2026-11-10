@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { createTestDb, seedBaseData } from "~/test/setup";
 import * as schema from "~/db/schema";
 import { UserRole } from "~/db/schema";
-import { postComment } from "./notifications.server";
+import { deletePost, postComment } from "./notifications.server";
 
 type TestDb = ReturnType<typeof createTestDb>;
 
@@ -130,6 +130,77 @@ describe("postComment", () => {
         status: 400,
         error: "Replies can only be one level deep",
       });
+    });
+  });
+});
+
+describe("deletePost", () => {
+  function post(authorId: number) {
+    const result = postComment(db, authorId, lessonId, null, "A post");
+    if (!result.ok) throw new Error(result.error);
+    return result.comment;
+  }
+
+  it("lets the author delete their own post", () => {
+    const question = post(base.user.id);
+
+    expect(deletePost(db, question.id, base.user.id)).toMatchObject({
+      ok: true,
+      comment: { id: question.id, deletedAt: expect.any(String) },
+    });
+  });
+
+  it("lets the course's Instructor delete someone else's post", () => {
+    const question = post(base.user.id);
+
+    expect(deletePost(db, question.id, base.instructor.id)).toMatchObject({
+      ok: true,
+      comment: { deletedAt: expect.any(String) },
+    });
+  });
+
+  it("lets a Platform Admin delete someone else's post", () => {
+    const question = post(base.user.id);
+    const admin = addUser("Pat", UserRole.Admin);
+
+    expect(deletePost(db, question.id, admin.id)).toMatchObject({
+      ok: true,
+      comment: { deletedAt: expect.any(String) },
+    });
+  });
+
+  it("refuses another Student, and another course's Instructor", () => {
+    const question = post(base.user.id);
+    const student = addUser("Sam");
+    const otherInstructor = addUser("Ivy", UserRole.Instructor);
+
+    for (const userId of [student.id, otherInstructor.id]) {
+      expect(deletePost(db, question.id, userId)).toEqual({
+        ok: false,
+        status: 403,
+        error: "You can only delete your own comments",
+      });
+    }
+  });
+
+  it("refuses a post that does not exist", () => {
+    expect(deletePost(db, 9999, base.user.id)).toEqual({
+      ok: false,
+      status: 404,
+      error: "Comment not found",
+    });
+  });
+
+  it("does nothing to a post that is already deleted", () => {
+    const question = post(base.user.id);
+    const first = deletePost(db, question.id, base.user.id);
+    if (!first.ok) throw new Error(first.error);
+
+    const second = deletePost(db, question.id, base.instructor.id);
+
+    expect(second).toMatchObject({
+      ok: true,
+      comment: { deletedAt: first.comment.deletedAt },
     });
   });
 });
