@@ -1,8 +1,9 @@
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import * as schema from "~/db/schema";
 import {
   comments,
+  courseRatings,
   courses,
   lessons,
   modules,
@@ -10,6 +11,7 @@ import {
   UserRole,
 } from "~/db/schema";
 import { MAX_COMMENT_LENGTH, MIN_COMMENT_LENGTH } from "~/lib/comments";
+import { MAX_RATING, MIN_RATING } from "~/lib/ratings";
 
 // ─── Notifications ───
 // The actions that will trigger Notifications: posting a question or a reply,
@@ -34,6 +36,10 @@ function getCourseForLesson(db: Db, lessonId: number) {
     .innerJoin(courses, eq(modules.courseId, courses.id))
     .where(eq(lessons.id, lessonId))
     .get();
+}
+
+function getCourse(db: Db, courseId: number) {
+  return db.select().from(courses).where(eq(courses.id, courseId)).get();
 }
 
 function isPlatformAdmin(db: Db, userId: number) {
@@ -153,4 +159,61 @@ export function deletePost(
     .get();
 
   return { ok: true, comment };
+}
+
+// ─── Rating a course ───
+
+type Rating = typeof courseRatings.$inferSelect;
+
+export type RateCourseResult = { ok: true; rating: Rating } | Failure;
+
+/**
+ * Records someone's rating of a course, in whole stars. Each person has one
+ * rating per course: rating again changes it.
+ */
+export function rateCourse(
+  db: Db,
+  raterId: number,
+  courseId: number,
+  stars: number
+): RateCourseResult {
+  if (!Number.isInteger(stars) || stars < MIN_RATING || stars > MAX_RATING) {
+    return {
+      ok: false,
+      status: 400,
+      error: `Rating must be a whole number between ${MIN_RATING} and ${MAX_RATING}`,
+    };
+  }
+
+  if (!getCourse(db, courseId)) {
+    return { ok: false, status: 404, error: "Course not found" };
+  }
+
+  const existing = db
+    .select()
+    .from(courseRatings)
+    .where(
+      and(
+        eq(courseRatings.userId, raterId),
+        eq(courseRatings.courseId, courseId)
+      )
+    )
+    .get();
+
+  if (existing) {
+    const rating = db
+      .update(courseRatings)
+      .set({ rating: stars, updatedAt: new Date().toISOString() })
+      .where(eq(courseRatings.id, existing.id))
+      .returning()
+      .get();
+    return { ok: true, rating };
+  }
+
+  const rating = db
+    .insert(courseRatings)
+    .values({ userId: raterId, courseId, rating: stars })
+    .returning()
+    .get();
+  return { ok: true, rating };
 }

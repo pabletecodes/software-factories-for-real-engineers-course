@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { createTestDb, seedBaseData } from "~/test/setup";
 import * as schema from "~/db/schema";
 import { UserRole } from "~/db/schema";
-import { deletePost, postComment } from "./notifications.server";
+import { deletePost, postComment, rateCourse } from "./notifications.server";
 
 type TestDb = ReturnType<typeof createTestDb>;
 
@@ -201,6 +201,40 @@ describe("deletePost", () => {
     expect(second).toMatchObject({
       ok: true,
       comment: { deletedAt: first.comment.deletedAt },
+    });
+  });
+});
+
+describe("rateCourse", () => {
+  it("records a first rating", () => {
+    expect(rateCourse(db, base.user.id, base.course.id, 4)).toMatchObject({
+      ok: true,
+      rating: { userId: base.user.id, courseId: base.course.id, rating: 4 },
+    });
+  });
+
+  it("changes a rating already given, keeping one per person", () => {
+    const first = rateCourse(db, base.user.id, base.course.id, 4);
+    const second = rateCourse(db, base.user.id, base.course.id, 2);
+
+    if (!first.ok || !second.ok) throw new Error("rating failed");
+    expect(second.rating.id).toBe(first.rating.id);
+    expect(second.rating.rating).toBe(2);
+  });
+
+  it.each([0, 6, 2.5])("refuses a rating of %s", (rating) => {
+    expect(rateCourse(db, base.user.id, base.course.id, rating)).toEqual({
+      ok: false,
+      status: 400,
+      error: "Rating must be a whole number between 1 and 5",
+    });
+  });
+
+  it("refuses a course that does not exist", () => {
+    expect(rateCourse(db, base.user.id, 9999, 3)).toEqual({
+      ok: false,
+      status: 404,
+      error: "Course not found",
     });
   });
 });
