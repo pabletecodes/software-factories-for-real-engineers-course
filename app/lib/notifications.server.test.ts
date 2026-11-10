@@ -451,3 +451,106 @@ describe("deleting a lesson that Notifications reference", () => {
     ).toEqual({ ok: true, target: { type: "unavailable" } });
   });
 });
+
+describe("Notifications for a deleted post", () => {
+  function post(authorId: number, parentId: number | null, body: string) {
+    const result = postComment(db, authorId, lessonId, parentId, body);
+    if (!result.ok) throw new Error(result.error);
+    return result.comment;
+  }
+
+  it("tells the author when the course's Instructor deletes their reply", () => {
+    const question = post(base.instructor.id, null, "Any questions?");
+    const reply = post(base.user.id, question.id, "Why is the sky blue?");
+
+    deletePost(db, reply.id, base.instructor.id);
+
+    expect(listLatestNotifications(db, base.user.id)).toEqual([
+      expect.objectContaining({
+        kind: NotificationKind.PostDeleted,
+        read: false,
+        title: `Test Instructor removed your post on "Lesson 1"`,
+        excerpt: "Why is the sky blue?",
+        courseTitle: "Test Course",
+      }),
+    ]);
+  });
+
+  it("tells the author when a Platform Admin deletes their question", () => {
+    const admin = addUser("Admin", UserRole.Admin);
+    const question = post(base.user.id, null, "Is this off-topic?");
+
+    deletePost(db, question.id, admin.id);
+
+    expect(listLatestNotifications(db, base.user.id)).toEqual([
+      expect.objectContaining({
+        kind: NotificationKind.PostDeleted,
+        title: `Admin removed your post on "Lesson 1"`,
+        excerpt: "Is this off-topic?",
+      }),
+    ]);
+  });
+
+  it("notifies nobody when the author deletes their own post", () => {
+    const question = post(base.user.id, null, "Never mind");
+
+    deletePost(db, question.id, base.user.id);
+
+    expect(listLatestNotifications(db, base.user.id)).toEqual([]);
+  });
+
+  it("notifies nobody when the post is already deleted", () => {
+    const question = post(base.user.id, null, "Oops");
+    deletePost(db, question.id, base.instructor.id);
+
+    deletePost(db, question.id, base.instructor.id);
+
+    expect(countUnreadNotifications(db, base.user.id)).toBe(1);
+  });
+
+  it("tells only the asker when a whole question is deleted, not its repliers", () => {
+    const replier = addUser("Replier");
+    const question = post(base.user.id, null, "A question");
+    post(replier.id, question.id, "A reply");
+
+    deletePost(db, question.id, base.instructor.id);
+
+    expect(countUnreadNotifications(db, base.user.id)).toBe(1);
+    expect(listLatestNotifications(db, replier.id)).toEqual([]);
+  });
+
+  it("keeps a long post's excerpt short", () => {
+    const question = post(base.user.id, null, "a".repeat(500));
+
+    deletePost(db, question.id, base.instructor.id);
+
+    const [notification] = listLatestNotifications(db, base.user.id);
+    expect(notification.excerpt).toBe(`${"a".repeat(199)}…`);
+  });
+
+  it("keeps the lesson title and excerpt after the lesson is hard-deleted", () => {
+    const question = post(base.user.id, null, "Off-topic rant");
+    deletePost(db, question.id, base.instructor.id);
+    // Comments are not cleaned up when a lesson goes; take them out of the way.
+    db.delete(schema.comments).run();
+    db.delete(schema.lessons).where(eq(schema.lessons.id, lessonId)).run();
+
+    expect(listLatestNotifications(db, base.user.id)).toEqual([
+      expect.objectContaining({
+        title: `Test Instructor removed your post on "Lesson 1"`,
+        excerpt: "Off-topic rant",
+      }),
+    ]);
+  });
+
+  it("marks it read on click and stays put", () => {
+    const question = post(base.user.id, null, "Off-topic rant");
+    deletePost(db, question.id, base.instructor.id);
+    const [notification] = listLatestNotifications(db, base.user.id);
+
+    expect(resolveNotificationClick(db, notification.id, base.user.id)).toEqual(
+      { ok: true, target: { type: "stay" } }
+    );
+    expect(countUnreadNotifications(db, base.user.id)).toBe(0);
+  });
+});
