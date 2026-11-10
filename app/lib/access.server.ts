@@ -1,45 +1,16 @@
 import { data } from "react-router";
-import { eq, and } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { db } from "~/db";
-import {
-  UserRole,
-  users,
-  courses,
-  enrollments,
-  purchases,
-} from "~/db/schema";
+import { UserRole, users } from "~/db/schema";
 import { getCurrentUserId } from "~/lib/session";
 import { resolveCountry } from "~/lib/country.server";
-import { checkPppAccess } from "~/lib/ppp";
+import {
+  resolveCourseAccess,
+  type CourseAccess,
+} from "~/lib/course-access.server";
 
 function getUserById(id: number) {
   return db.select().from(users).where(eq(users.id, id)).get();
-}
-
-function getCourseById(id: number) {
-  return db.select().from(courses).where(eq(courses.id, id)).get();
-}
-
-function findEnrollment(userId: number, courseId: number) {
-  return db
-    .select()
-    .from(enrollments)
-    .where(
-      and(eq(enrollments.userId, userId), eq(enrollments.courseId, courseId))
-    )
-    .get();
-}
-
-function isUserEnrolled(userId: number, courseId: number) {
-  return !!findEnrollment(userId, courseId);
-}
-
-function findPurchase(userId: number, courseId: number) {
-  return db
-    .select()
-    .from(purchases)
-    .where(and(eq(purchases.userId, userId), eq(purchases.courseId, courseId)))
-    .get();
 }
 
 // ─── Access Resolution ───
@@ -51,24 +22,12 @@ function findPurchase(userId: number, courseId: number) {
 //
 // Uses positional parameters (project convention).
 
-export type Access = {
-  userId: number | null;
-  user: ReturnType<typeof getUserById>;
-  isAdmin: boolean;
-  /** The instructor who owns this specific course. */
-  isOwningInstructor: boolean;
-  /** Owning instructor or admin — the people who speak for the course. */
-  isStaff: boolean;
-  enrolled: boolean;
-  pppBlocked: boolean;
-  pppBlockedCountry: string | null;
-  pppPurchaseCountry: string | null;
-  /**
-   * May they read the course's content (lesson bodies, comments)?
-   * Staff always can. Students need an enrollment that isn't PPP-blocked.
-   */
-  canViewContent: boolean;
-};
+/** A signed-in user's access to a course. */
+export type SignedInAccess = { userId: number } & CourseAccess;
+
+export type Access =
+  | SignedInAccess
+  | ({ userId: null; user: undefined } & Omit<CourseAccess, "user">);
 
 const SIGNED_OUT: Access = {
   userId: null,
@@ -83,6 +42,7 @@ const SIGNED_OUT: Access = {
   canViewContent: false,
 };
 
+/** Who is asking, and what they may do with the course (course-access.server.ts). */
 export async function getAccess(
   request: Request,
   courseId: number
@@ -90,45 +50,15 @@ export async function getAccess(
   const userId = await getCurrentUserId(request);
   if (!userId) return SIGNED_OUT;
 
-  const user = getUserById(userId);
-  if (!user) return SIGNED_OUT;
-
-  const course = getCourseById(courseId);
-  const isAdmin = user.role === UserRole.Admin;
-  const isOwningInstructor = course?.instructorId === userId;
-  const isStaff = isAdmin || isOwningInstructor;
-  const enrolled = isUserEnrolled(userId, courseId);
-
-  // PPP only restricts students who bought at a discount — staff are exempt.
-  let ppp = {
-    blocked: false,
-    blockedCountry: null as string | null,
-    purchaseCountry: null as string | null,
-  };
-
-  if (enrolled && !isStaff && course) {
-    const purchase = findPurchase(userId, courseId);
-    const currentCountry = await resolveCountry(request);
-    ppp = checkPppAccess(
-      course.price,
-      course.pppEnabled,
-      purchase?.country ?? null,
-      currentCountry
-    );
-  }
-
-  return {
+  const access = resolveCourseAccess(
+    db,
     userId,
-    user,
-    isAdmin,
-    isOwningInstructor,
-    isStaff,
-    enrolled,
-    pppBlocked: ppp.blocked,
-    pppBlockedCountry: ppp.blockedCountry,
-    pppPurchaseCountry: ppp.purchaseCountry,
-    canViewContent: isStaff || (enrolled && !ppp.blocked),
-  };
+    courseId,
+    await resolveCountry(request)
+  );
+  if (!access) return SIGNED_OUT;
+
+  return { userId, ...access };
 }
 
 /**
@@ -149,10 +79,10 @@ export async function requireUserId(request: Request): Promise<number> {
 export async function requireContentAccess(
   request: Request,
   courseId: number
-): Promise<Access> {
+): Promise<SignedInAccess> {
   const access = await getAccess(request, courseId);
 
-  if (!access.userId) {
+  if (access.userId === null) {
     throw data("Select a user from the DevUI panel.", { status: 401 });
   }
 
@@ -169,10 +99,10 @@ export async function requireContentAccess(
 export async function requireStaff(
   request: Request,
   courseId: number
-): Promise<Access> {
+): Promise<SignedInAccess> {
   const access = await getAccess(request, courseId);
 
-  if (!access.userId) {
+  if (access.userId === null) {
     throw data("Select a user from the DevUI panel.", { status: 401 });
   }
 

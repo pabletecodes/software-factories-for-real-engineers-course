@@ -3,6 +3,15 @@ import type { Route } from "./+types/layout.app";
 import { Sidebar } from "~/components/sidebar";
 import { DevUI } from "~/components/dev-ui";
 import { Toaster } from "sonner";
+import {
+  NotificationBell,
+  type NotificationBellData,
+} from "~/components/notification-bell";
+import {
+  countNotifications,
+  countUnreadNotifications,
+  listLatestNotifications,
+} from "~/lib/notifications.server";
 import { getCurrentUserId, getDevCountry } from "~/lib/session";
 import { getCountryTierInfo, COUNTRIES } from "~/lib/ppp";
 import { eq, and, or, sql, desc } from "drizzle-orm";
@@ -17,7 +26,20 @@ import {
   teamMembers,
   TeamMemberRole,
   LessonProgressStatus,
+  UserRole,
 } from "~/db/schema";
+
+/** The bell's data, for Students and Instructors only. */
+function getNotificationBellData(
+  user: { id: number; role: UserRole } | null | undefined
+): NotificationBellData | null {
+  if (!user || user.role === UserRole.Admin) return null;
+  return {
+    unreadCount: countUnreadNotifications(db, user.id),
+    latest: listLatestNotifications(db, user.id),
+    total: countNotifications(db, user.id).total,
+  };
+}
 
 function getAllUsers() {
   return db.select().from(users).all();
@@ -185,7 +207,11 @@ export async function loader({ request }: Route.LoaderArgs) {
           course.courseId
         );
         const totalLessons = getTotalLessonCount(course.courseId);
-        const progress = calculateProgress(currentUserId, course.courseId, false);
+        const progress = calculateProgress(
+          currentUserId,
+          course.courseId,
+          false
+        );
         return {
           courseId: course.courseId,
           title: course.courseTitle,
@@ -213,6 +239,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     countryTierInfo,
     countries: COUNTRIES,
     isTeamAdmin: currentUserId ? isTeamAdmin(currentUserId) : false,
+    notifications: getNotificationBellData(currentUser),
   };
 }
 
@@ -225,6 +252,7 @@ export default function AppLayout({ loaderData }: Route.ComponentProps) {
     countryTierInfo,
     countries,
     isTeamAdmin: userIsTeamAdmin,
+    notifications,
   } = loaderData;
 
   return (
@@ -233,6 +261,7 @@ export default function AppLayout({ loaderData }: Route.ComponentProps) {
         currentUser={currentUser}
         recentCourses={recentCourses}
         isTeamAdmin={userIsTeamAdmin}
+        headerSlot={notifications && <NotificationBell data={notifications} />}
       />
       <main className="flex-1 overflow-y-auto">
         <Outlet />

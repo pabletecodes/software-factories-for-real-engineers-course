@@ -13,6 +13,7 @@ import {
   RefundStatus,
   QuestionType,
   TeamMemberRole,
+  NotificationKind,
 } from "../app/db/schema";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -65,6 +66,7 @@ async function seed() {
 
   // Drop and recreate tables for a clean seed
   sqlite.exec(`
+    DROP TABLE IF EXISTS notifications;
     DROP TABLE IF EXISTS comments;
     DROP TABLE IF EXISTS course_ratings;
     DROP TABLE IF EXISTS video_watch_events;
@@ -1994,6 +1996,276 @@ This course is still in draft while the cluster examples are rewritten against t
     `Created ${countRows(schema.comments)} lesson comments across ${countRows(schema.comments, isNull(schema.comments.parentId))} threads.`
   );
 
+  // ─── Notifications ───
+  // A "new question" Notification for the course's Instructor for every
+  // question someone else asked, at the time it was asked. Questions from the
+  // last 10 days are still unread, so each seeded Instructor's bell has a badge.
+
+  const questions = db
+    .select({
+      commentId: schema.comments.id,
+      lessonId: schema.comments.lessonId,
+      authorId: schema.comments.userId,
+      createdAt: schema.comments.createdAt,
+      courseId: schema.courses.id,
+      instructorId: schema.courses.instructorId,
+    })
+    .from(schema.comments)
+    .innerJoin(schema.lessons, eq(schema.comments.lessonId, schema.lessons.id))
+    .innerJoin(schema.modules, eq(schema.lessons.moduleId, schema.modules.id))
+    .innerJoin(schema.courses, eq(schema.modules.courseId, schema.courses.id))
+    .where(isNull(schema.comments.parentId))
+    .all();
+
+  for (const question of questions) {
+    if (question.authorId === question.instructorId) continue;
+    const askedDaysAgo =
+      (Date.now() - Date.parse(question.createdAt)) / 86_400_000;
+    db.insert(schema.notifications)
+      .values({
+        recipientId: question.instructorId,
+        actorId: question.authorId,
+        kind: NotificationKind.NewQuestion,
+        courseId: question.courseId,
+        lessonId: question.lessonId,
+        commentId: question.commentId,
+        createdAt: question.createdAt,
+        readAt: askedDaysAgo < 10 ? null : question.createdAt,
+      })
+      .run();
+  }
+
+  // ─── Notifications: replies (ticket #14) ───
+  // A "reply" Notification for everyone who had posted in a thread before each
+  // seeded reply (the asker and earlier repliers), except whoever replied.
+  // Replies from the last 10 days are still unread.
+
+  const seededReplies = db
+    .select({
+      commentId: schema.comments.id,
+      questionId: schema.comments.parentId,
+      lessonId: schema.comments.lessonId,
+      authorId: schema.comments.userId,
+      createdAt: schema.comments.createdAt,
+      courseId: schema.courses.id,
+    })
+    .from(schema.comments)
+    .innerJoin(schema.lessons, eq(schema.comments.lessonId, schema.lessons.id))
+    .innerJoin(schema.modules, eq(schema.lessons.moduleId, schema.modules.id))
+    .innerJoin(schema.courses, eq(schema.modules.courseId, schema.courses.id))
+    .where(isNotNull(schema.comments.parentId))
+    .all();
+
+  const threadPosts = db
+    .select({
+      id: schema.comments.id,
+      parentId: schema.comments.parentId,
+      userId: schema.comments.userId,
+    })
+    .from(schema.comments)
+    .all();
+
+  for (const reply of seededReplies) {
+    const earlierAuthors = new Set(
+      threadPosts
+        .filter(
+          (post) =>
+            (post.id === reply.questionId ||
+              post.parentId === reply.questionId) &&
+            post.id < reply.commentId
+        )
+        .map((post) => post.userId)
+    );
+    earlierAuthors.delete(reply.authorId);
+    const repliedDaysAgo =
+      (Date.now() - Date.parse(reply.createdAt)) / 86_400_000;
+    for (const recipientId of earlierAuthors) {
+      db.insert(schema.notifications)
+        .values({
+          recipientId,
+          actorId: reply.authorId,
+          kind: NotificationKind.Reply,
+          courseId: reply.courseId,
+          lessonId: reply.lessonId,
+          commentId: reply.commentId,
+          createdAt: reply.createdAt,
+          readAt: repliedDaysAgo < 10 ? null : reply.createdAt,
+        })
+        .run();
+    }
+  }
+
+  // ─── Notifications: deleted posts (ticket #16) ───
+  // Staff deleted two Students' posts. Each author is told, with a snapshot of
+  // the lesson title and an excerpt; the recent one is still unread.
+
+  const deletedPosts = [
+    {
+      // An off-topic reply the course's Instructor deleted.
+      deleted: comment({
+        lessonId: course1LessonIds[0],
+        userId: students[0].id,
+        parentId: c1q5.id,
+        body: "Honestly just skip this course and watch YouTube instead, it's free.",
+        createdAt: daysAgo(3),
+        deletedAt: daysAgo(2),
+      }),
+      deleterId: instructor1.id,
+      courseId: course1.id,
+      readAt: null,
+    },
+    {
+      // A duplicate question a Platform Admin deleted.
+      deleted: comment({
+        lessonId: course2LessonIds[0],
+        userId: students[1].id,
+        body: "Are the example requests real or mocked? (Sorry if this was asked already.)",
+        createdAt: daysAgo(20),
+        deletedAt: daysAgo(19),
+      }),
+      deleterId: admin.id,
+      courseId: course2.id,
+      readAt: daysAgo(18),
+    },
+  ];
+
+  for (const { deleted, deleterId, courseId, readAt } of deletedPosts) {
+    const lesson = db
+      .select({ title: schema.lessons.title })
+      .from(schema.lessons)
+      .where(eq(schema.lessons.id, deleted.lessonId))
+      .get();
+    if (!lesson || deleted.deletedAt === null) {
+      throw new Error("A seeded deleted post needs its lesson and deletedAt");
+    }
+    db.insert(schema.notifications)
+      .values({
+        recipientId: deleted.userId,
+        actorId: deleterId,
+        kind: NotificationKind.PostDeleted,
+        courseId,
+        lessonId: deleted.lessonId,
+        commentId: deleted.id,
+        lessonTitle: lesson.title,
+        excerpt: deleted.body,
+        createdAt: deleted.deletedAt,
+        readAt,
+      })
+      .run();
+  }
+
+  console.log(
+    `Created ${countRows(schema.notifications)} notifications (${countRows(schema.notifications, isNull(schema.notifications.readAt))} unread).`
+  );
+
+  // ─── Notifications: new ratings and course status changes (#15) ───
+  // A "new rating" Notification for the course's Instructor for every rating
+  // seeded so far, at the time it was given; the last 10 days are unread. Plus
+  // two status changes Alex Rivera (Platform Admin) made to instructor2's
+  // courses, matching their updatedAt.
+
+  const seededRatings = db
+    .select({
+      ratingId: schema.courseRatings.id,
+      raterId: schema.courseRatings.userId,
+      createdAt: schema.courseRatings.createdAt,
+      courseId: schema.courses.id,
+      instructorId: schema.courses.instructorId,
+    })
+    .from(schema.courseRatings)
+    .innerJoin(
+      schema.courses,
+      eq(schema.courseRatings.courseId, schema.courses.id)
+    )
+    .all();
+
+  for (const rating of seededRatings) {
+    if (rating.raterId === rating.instructorId) continue;
+    const ratedDaysAgo =
+      (Date.now() - Date.parse(rating.createdAt)) / 86_400_000;
+    db.insert(schema.notifications)
+      .values({
+        recipientId: rating.instructorId,
+        actorId: rating.raterId,
+        kind: NotificationKind.NewRating,
+        courseId: rating.courseId,
+        ratingId: rating.ratingId,
+        createdAt: rating.createdAt,
+        readAt: ratedDaysAgo < 10 ? null : rating.createdAt,
+      })
+      .run();
+  }
+
+  db.insert(schema.notifications)
+    .values([
+      {
+        recipientId: course4.instructorId,
+        actorId: admin.id,
+        kind: NotificationKind.CourseStatusChanged,
+        courseId: course4.id,
+        fromStatus: CourseStatus.Draft,
+        toStatus: CourseStatus.Published,
+        createdAt: daysAgo(6),
+        readAt: daysAgo(5),
+      },
+      {
+        recipientId: course5.instructorId,
+        actorId: admin.id,
+        kind: NotificationKind.CourseStatusChanged,
+        courseId: course5.id,
+        fromStatus: CourseStatus.Published,
+        toStatus: CourseStatus.Draft,
+        createdAt: daysAgo(2),
+        readAt: null,
+      },
+    ])
+    .run();
+
+  console.log(
+    `Created ${countRows(schema.notifications, eq(schema.notifications.kind, NotificationKind.NewRating))} new-rating and ${countRows(schema.notifications, eq(schema.notifications.kind, NotificationKind.CourseStatusChanged))} course-status notifications.`
+  );
+
+  // ─── Notifications: a long history (ticket #19) ───
+  // Sarah Chen (instructor1) gets 1,000 older Notifications, so the full
+  // Notifications page has many pages to filter and work through. They repeat
+  // her real question, reply and rating Notifications (same actor, course and
+  // target) at earlier times, one every 17 hours or so, going back about two
+  // years from a month ago. Every 25th is still unread.
+
+  const LONG_HISTORY_SIZE = 1000;
+  const longHistoryTemplates = db
+    .select()
+    .from(schema.notifications)
+    .where(eq(schema.notifications.recipientId, instructor1.id))
+    .all();
+
+  if (longHistoryTemplates.length > 0) {
+    const longHistory = Array.from({ length: LONG_HISTORY_SIZE }, (_, i) => {
+      const {
+        id: _id,
+        createdAt: _createdAt,
+        readAt: _readAt,
+        ...template
+      } = longHistoryTemplates[i % longHistoryTemplates.length];
+      const createdAt = hoursAgo(30 * 24 + i * 17);
+      return {
+        ...template,
+        createdAt,
+        readAt: i % 25 === 0 ? null : createdAt,
+      };
+    });
+    // Insert in chunks to stay under SQLite's bound-parameter limit.
+    for (let start = 0; start < longHistory.length; start += 100) {
+      db.insert(schema.notifications)
+        .values(longHistory.slice(start, start + 100))
+        .run();
+    }
+  }
+
+  console.log(
+    `Created ${countRows(schema.notifications, eq(schema.notifications.recipientId, instructor1.id))} notifications for ${instructor1.name}, including a long history.`
+  );
+
   // ─── Lesson Progress ───
 
   // Helper to mark lessons as complete
@@ -2840,6 +3112,9 @@ This course is still in draft while the cluster examples are rewritten against t
   console.log(`  Enrollments: ${countRows(schema.enrollments)}`);
   console.log(`  Course ratings: ${countRows(schema.courseRatings)}`);
   console.log(`  Lesson comments: ${countRows(schema.comments)}`);
+  console.log(
+    `  Notifications: ${countRows(schema.notifications)} (${countRows(schema.notifications, isNull(schema.notifications.readAt))} unread)`
+  );
   console.log(
     `  Lesson progress: ${countRows(schema.lessonProgress)} (${countRows(schema.lessonProgress, eq(schema.lessonProgress.status, LessonProgressStatus.Completed))} completed)`
   );

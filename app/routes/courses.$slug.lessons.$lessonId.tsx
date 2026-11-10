@@ -10,6 +10,11 @@ import {
   type RenderedComment,
 } from "~/components/comment-thread";
 import { MIN_COMMENT_LENGTH, MAX_COMMENT_LENGTH } from "~/lib/comments";
+import {
+  deletePost,
+  getCourseForLesson,
+  postComment,
+} from "~/lib/notifications.server";
 import { db } from "~/db";
 import {
   categories,
@@ -308,21 +313,6 @@ function calculateWatchProgress(
   return Math.min(Math.round((maxPosition / videoDurationSeconds) * 100), 100);
 }
 
-function getCourseForLesson(lessonId: number) {
-  return db
-    .select({
-      courseId: courses.id,
-      courseTitle: courses.title,
-      courseSlug: courses.slug,
-      instructorId: courses.instructorId,
-    })
-    .from(lessons)
-    .innerJoin(modules, eq(lessons.moduleId, modules.id))
-    .innerJoin(courses, eq(modules.courseId, courses.id))
-    .where(eq(lessons.id, lessonId))
-    .get();
-}
-
 function getCommentById(commentId: number) {
   return db.select().from(comments).where(eq(comments.id, commentId)).get();
 }
@@ -341,7 +331,7 @@ function assertValidBody(body: string) {
 }
 
 function getLessonThread(lessonId: number): ThreadComment[] {
-  const course = getCourseForLesson(lessonId);
+  const course = getCourseForLesson(db, lessonId);
   if (!course) return [];
 
   const rows = db
@@ -401,39 +391,6 @@ function getLessonThread(lessonId: number): ThreadComment[] {
   return topLevel.filter((c) => !c.deleted || c.replies.length > 0);
 }
 
-function createComment(
-  userId: number,
-  lessonId: number,
-  parentId: number | null,
-  body: string
-) {
-  const trimmed = assertValidBody(body);
-
-  const course = getCourseForLesson(lessonId);
-  if (!course) {
-    throw new Error("Lesson not found");
-  }
-
-  if (parentId !== null) {
-    const parent = getCommentById(parentId);
-    if (!parent) {
-      throw new Error("Parent comment not found");
-    }
-    if (parent.lessonId !== lessonId) {
-      throw new Error("Parent comment belongs to a different lesson");
-    }
-    if (parent.parentId !== null) {
-      throw new Error("Replies can only be one level deep");
-    }
-  }
-
-  return db
-    .insert(comments)
-    .values({ userId, lessonId, parentId, body: trimmed })
-    .returning()
-    .get();
-}
-
 function updateComment(commentId: number, userId: number, body: string) {
   const trimmed = assertValidBody(body);
 
@@ -451,26 +408,6 @@ function updateComment(commentId: number, userId: number, body: string) {
   return db
     .update(comments)
     .set({ body: trimmed, editedAt: new Date().toISOString() })
-    .where(eq(comments.id, commentId))
-    .returning()
-    .get();
-}
-
-function deleteComment(commentId: number, userId: number, isStaff: boolean) {
-  const existing = getCommentById(commentId);
-  if (!existing) {
-    throw new Error("Comment not found");
-  }
-  if (existing.userId !== userId && !isStaff) {
-    throw new Error("You can only delete your own comments");
-  }
-  if (existing.deletedAt !== null) {
-    return existing;
-  }
-
-  return db
-    .update(comments)
-    .set({ deletedAt: new Date().toISOString() })
     .where(eq(comments.id, commentId))
     .returning()
     .get();
@@ -892,7 +829,7 @@ export async function action({ params, request }: Route.ActionArgs) {
     intent === "edit-comment" ||
     intent === "delete-comment"
   ) {
-    const access = await requireContentAccess(request, course.id);
+    await requireContentAccess(request, course.id);
 
     try {
       if (intent === "create-comment") {
@@ -900,12 +837,16 @@ export async function action({ params, request }: Route.ActionArgs) {
         if (!parsed.success) {
           return { ok: false, error: "Enter a comment before posting." };
         }
-        createComment(
+        const result = postComment(
+          db,
           currentUserId,
           lessonId,
           parsed.data.parentId ?? null,
           parsed.data.body
         );
+        if (!result.ok) {
+          throw data(result.error, { status: result.status });
+        }
         return { ok: true };
       }
 
@@ -932,7 +873,10 @@ export async function action({ params, request }: Route.ActionArgs) {
       if (!existing || existing.lessonId !== lessonId) {
         throw data("Comment not found", { status: 404 });
       }
-      deleteComment(parsed.data.commentId, currentUserId, access.isStaff);
+      const result = deletePost(db, parsed.data.commentId, currentUserId);
+      if (!result.ok) {
+        throw data(result.error, { status: result.status });
+      }
       return { ok: true };
     } catch (error) {
       // Service validation failures are user-correctable; anything thrown as a

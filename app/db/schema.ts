@@ -42,6 +42,15 @@ export enum TeamMemberRole {
   Member = "member",
 }
 
+// What a Notification is about. A reply covers Students and Instructors alike.
+export enum NotificationKind {
+  Reply = "reply",
+  PostDeleted = "post_deleted",
+  NewQuestion = "new_question",
+  NewRating = "new_rating",
+  CourseStatusChanged = "course_status_changed",
+}
+
 // ─── Tables ───
 
 export const users = sqliteTable("users", {
@@ -374,3 +383,52 @@ export const videoWatchEvents = sqliteTable("video_watch_events", {
     .notNull()
     .$defaultFn(() => new Date().toISOString()),
 });
+
+// One row per recipient per event. Holds references rather than a frozen URL,
+// so where a click leads is worked out when it is clicked, and names and titles
+// are joined when reading. Only facts that change or disappear later are
+// snapshotted. Deleting a Notification removes the row.
+export const notifications = sqliteTable(
+  "notifications",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    recipientId: integer("recipient_id")
+      .notNull()
+      .references(() => users.id),
+    // Who did the thing the Notification is about.
+    actorId: integer("actor_id")
+      .notNull()
+      .references(() => users.id),
+    kind: text("kind").notNull().$type<NotificationKind>(),
+    courseId: integer("course_id")
+      .notNull()
+      .references(() => courses.id),
+    // Lessons are hard-deleted with their module, so these two are plain
+    // integers with no foreign key: a Notification must never block deleting
+    // a lesson, and reads cope with a lesson that has gone.
+    lessonId: integer("lesson_id"),
+    commentId: integer("comment_id"),
+    ratingId: integer("rating_id").references(() => courseRatings.id),
+    // Snapshots. A status change keeps its from and to statuses; a deleted
+    // post keeps its lesson's title and an excerpt of what was written.
+    fromStatus: text("from_status").$type<CourseStatus>(),
+    toStatus: text("to_status").$type<CourseStatus>(),
+    lessonTitle: text("lesson_title"),
+    excerpt: text("excerpt"),
+    createdAt: text("created_at")
+      .notNull()
+      .$defaultFn(() => new Date().toISOString()),
+    // Null while unread.
+    readAt: text("read_at"),
+  },
+  (table) => [
+    index("notifications_recipient_created_idx").on(
+      table.recipientId,
+      table.createdAt
+    ),
+    index("notifications_recipient_read_idx").on(
+      table.recipientId,
+      table.readAt
+    ),
+  ]
+);
