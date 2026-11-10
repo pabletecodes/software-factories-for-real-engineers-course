@@ -631,3 +631,113 @@ describe("deleting a lesson that Notifications reference", () => {
     ).toEqual({ ok: true, target: { type: "unavailable" } });
   });
 });
+
+describe("Notifications for a new course rating", () => {
+  it("notifies the course's Instructor of a first rating", () => {
+    rateCourse(db, base.user.id, base.course.id, 4);
+
+    expect(listLatestNotifications(db, base.instructor.id)).toEqual([
+      expect.objectContaining({
+        kind: NotificationKind.NewRating,
+        read: false,
+        title: "Test User rated your course ★★★★☆",
+        excerpt: null,
+        courseTitle: "Test Course",
+      }),
+    ]);
+    expect(listLatestNotifications(db, base.user.id)).toEqual([]);
+  });
+
+  it("notifies nobody when a rating is changed", () => {
+    rateCourse(db, base.user.id, base.course.id, 4);
+    rateCourse(db, base.user.id, base.course.id, 2);
+
+    expect(listLatestNotifications(db, base.instructor.id)).toHaveLength(1);
+  });
+
+  it("notifies nobody when the Instructor rates their own course", () => {
+    rateCourse(db, base.instructor.id, base.course.id, 5);
+
+    expect(listLatestNotifications(db, base.instructor.id)).toEqual([]);
+    expect(listLatestNotifications(db, base.user.id)).toEqual([]);
+  });
+
+  it("leads a click to the course's tab in Instructor analytics", () => {
+    rateCourse(db, base.user.id, base.course.id, 4);
+    const [notification] = listLatestNotifications(db, base.instructor.id);
+
+    expect(
+      resolveNotificationClick(db, notification.id, base.instructor.id)
+    ).toEqual({
+      ok: true,
+      target: {
+        type: "url",
+        url: `/instructor/analytics?tab=course&course=${base.course.id}`,
+      },
+    });
+    expect(countUnreadNotifications(db, base.instructor.id)).toBe(0);
+  });
+});
+
+describe("Notifications for a course status change", () => {
+  let admin: ReturnType<typeof addUser>;
+  beforeEach(() => {
+    admin = addUser("Pat", UserRole.Admin);
+  });
+
+  it("notifies the Instructor when a Platform Admin changes the status", () => {
+    changeCourseStatus(db, base.course.id, admin.id, CourseStatus.Archived);
+
+    expect(listLatestNotifications(db, base.instructor.id)).toEqual([
+      expect.objectContaining({
+        kind: NotificationKind.CourseStatusChanged,
+        read: false,
+        title: "Pat moved your course from Published to Archived",
+        courseTitle: "Test Course",
+      }),
+    ]);
+    expect(listLatestNotifications(db, admin.id)).toEqual([]);
+  });
+
+  it("keeps the old and new status after the course's status changes again", () => {
+    changeCourseStatus(db, base.course.id, admin.id, CourseStatus.Archived);
+    changeCourseStatus(db, base.course.id, admin.id, CourseStatus.Draft);
+
+    expect(
+      listLatestNotifications(db, base.instructor.id).map((n) => n.title)
+    ).toEqual([
+      "Pat moved your course from Archived to Draft",
+      "Pat moved your course from Published to Archived",
+    ]);
+  });
+
+  it("notifies nobody when the Instructor changes their own course's status", () => {
+    changeCourseStatus(
+      db,
+      base.course.id,
+      base.instructor.id,
+      CourseStatus.Draft
+    );
+
+    expect(listLatestNotifications(db, base.instructor.id)).toEqual([]);
+    expect(listLatestNotifications(db, admin.id)).toEqual([]);
+  });
+
+  it("notifies nobody when the status stays the same", () => {
+    changeCourseStatus(db, base.course.id, admin.id, CourseStatus.Published);
+
+    expect(listLatestNotifications(db, base.instructor.id)).toEqual([]);
+  });
+
+  it("leads a click to the Instructor course page", () => {
+    changeCourseStatus(db, base.course.id, admin.id, CourseStatus.Draft);
+    const [notification] = listLatestNotifications(db, base.instructor.id);
+
+    expect(
+      resolveNotificationClick(db, notification.id, base.instructor.id)
+    ).toEqual({
+      ok: true,
+      target: { type: "url", url: `/instructor/${base.course.id}` },
+    });
+  });
+});
