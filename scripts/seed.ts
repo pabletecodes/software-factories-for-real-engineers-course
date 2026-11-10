@@ -2039,6 +2039,73 @@ This course is still in draft while the cluster examples are rewritten against t
     `Created ${countRows(schema.notifications)} notifications (${countRows(schema.notifications, isNull(schema.notifications.readAt))} unread).`
   );
 
+  // ─── Notifications: new ratings and course status changes (#15) ───
+  // A "new rating" Notification for the course's Instructor for every rating
+  // seeded so far, at the time it was given; the last 10 days are unread. Plus
+  // two status changes Alex Rivera (Platform Admin) made to instructor2's
+  // courses, matching their updatedAt.
+
+  const seededRatings = db
+    .select({
+      ratingId: schema.courseRatings.id,
+      raterId: schema.courseRatings.userId,
+      createdAt: schema.courseRatings.createdAt,
+      courseId: schema.courses.id,
+      instructorId: schema.courses.instructorId,
+    })
+    .from(schema.courseRatings)
+    .innerJoin(
+      schema.courses,
+      eq(schema.courseRatings.courseId, schema.courses.id)
+    )
+    .all();
+
+  for (const rating of seededRatings) {
+    if (rating.raterId === rating.instructorId) continue;
+    const ratedDaysAgo =
+      (Date.now() - Date.parse(rating.createdAt)) / 86_400_000;
+    db.insert(schema.notifications)
+      .values({
+        recipientId: rating.instructorId,
+        actorId: rating.raterId,
+        kind: NotificationKind.NewRating,
+        courseId: rating.courseId,
+        ratingId: rating.ratingId,
+        createdAt: rating.createdAt,
+        readAt: ratedDaysAgo < 10 ? null : rating.createdAt,
+      })
+      .run();
+  }
+
+  db.insert(schema.notifications)
+    .values([
+      {
+        recipientId: course4.instructorId,
+        actorId: admin.id,
+        kind: NotificationKind.CourseStatusChanged,
+        courseId: course4.id,
+        fromStatus: CourseStatus.Draft,
+        toStatus: CourseStatus.Published,
+        createdAt: daysAgo(6),
+        readAt: daysAgo(5),
+      },
+      {
+        recipientId: course5.instructorId,
+        actorId: admin.id,
+        kind: NotificationKind.CourseStatusChanged,
+        courseId: course5.id,
+        fromStatus: CourseStatus.Published,
+        toStatus: CourseStatus.Draft,
+        createdAt: daysAgo(2),
+        readAt: null,
+      },
+    ])
+    .run();
+
+  console.log(
+    `Created ${countRows(schema.notifications, eq(schema.notifications.kind, NotificationKind.NewRating))} new-rating and ${countRows(schema.notifications, eq(schema.notifications.kind, NotificationKind.CourseStatusChanged))} course-status notifications.`
+  );
+
   // ─── Lesson Progress ───
 
   // Helper to mark lessons as complete

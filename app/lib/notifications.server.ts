@@ -219,7 +219,8 @@ export type RateCourseResult = { ok: true; rating: Rating } | Failure;
 
 /**
  * Records someone's rating of a course, in whole stars. Each person has one
- * rating per course: rating again changes it.
+ * rating per course: rating again changes it. A first rating notifies the
+ * course's Instructor; a changed rating notifies nobody.
  */
 export function rateCourse(
   db: Db,
@@ -235,7 +236,8 @@ export function rateCourse(
     };
   }
 
-  if (!getCourse(db, courseId)) {
+  const course = getCourse(db, courseId);
+  if (!course) {
     return { ok: false, status: 404, error: "Course not found" };
   }
 
@@ -260,12 +262,22 @@ export function rateCourse(
     return { ok: true, rating };
   }
 
-  const rating = db
-    .insert(courseRatings)
-    .values({ userId: raterId, courseId, rating: stars })
-    .returning()
-    .get();
-  return { ok: true, rating };
+  return db.transaction((tx): RateCourseResult => {
+    const rating = tx
+      .insert(courseRatings)
+      .values({ userId: raterId, courseId, rating: stars })
+      .returning()
+      .get();
+
+    notify(tx, [course.instructorId], {
+      kind: NotificationKind.NewRating,
+      actorId: raterId,
+      courseId,
+      ratingId: rating.id,
+    });
+
+    return { ok: true, rating };
+  });
 }
 
 // ─── Changing a course's status ───
@@ -276,7 +288,8 @@ export type ChangeCourseStatusResult = { ok: true; course: Course } | Failure;
 
 /**
  * Moves a course between Draft, Published and Archived. Only its Instructor or
- * a Platform Admin may.
+ * a Platform Admin may. A move to a different status notifies the Instructor,
+ * keeping the old and new status, unless they made it themselves.
  */
 export function changeCourseStatus(
   db: Db,
@@ -297,14 +310,26 @@ export function changeCourseStatus(
     };
   }
 
-  const course = db
-    .update(courses)
-    .set({ status, updatedAt: new Date().toISOString() })
-    .where(eq(courses.id, courseId))
-    .returning()
-    .get();
+  return db.transaction((tx): ChangeCourseStatusResult => {
+    const course = tx
+      .update(courses)
+      .set({ status, updatedAt: new Date().toISOString() })
+      .where(eq(courses.id, courseId))
+      .returning()
+      .get();
 
-  return { ok: true, course };
+    if (existing.status !== status) {
+      notify(tx, [existing.instructorId], {
+        kind: NotificationKind.CourseStatusChanged,
+        actorId: changerId,
+        courseId,
+        fromStatus: existing.status,
+        toStatus: status,
+      });
+    }
+
+    return { ok: true, course };
+  });
 }
 
 // ─── Reading Notifications ───
@@ -338,12 +363,14 @@ function selectNotifications(db: Queryable) {
       lessonExists: lessons.id,
       commentBody: comments.body,
       commentDeletedAt: comments.deletedAt,
+      ratingStars: courseRatings.rating,
     })
     .from(notifications)
     .innerJoin(actors, eq(notifications.actorId, actors.id))
     .innerJoin(courses, eq(notifications.courseId, courses.id))
     .leftJoin(lessons, eq(notifications.lessonId, lessons.id))
-    .leftJoin(comments, eq(notifications.commentId, comments.id));
+    .leftJoin(comments, eq(notifications.commentId, comments.id))
+    .leftJoin(courseRatings, eq(notifications.ratingId, courseRatings.id));
 }
 
 type NotificationRow = ReturnType<
@@ -361,9 +388,31 @@ function describeNotification(
         title: `${actorName} asked a question`,
         excerpt: row.commentBody,
       };
+    case NotificationKind.NewRating:
+      return {
+        title: `${actorName} rated your course ${stars(row.ratingStars)}`,
+        excerpt: null,
+      };
+    case NotificationKind.CourseStatusChanged:
+      return {
+        title: `${actorName} moved your course from ${statusLabel(notification.fromStatus)} to ${statusLabel(notification.toStatus)}`,
+        excerpt: null,
+      };
     default:
       return { title: "Notification", excerpt: notification.excerpt };
   }
+}
+
+/** A rating as filled and empty stars, e.g. ★★★★☆ for 4. */
+function stars(rating: number | null) {
+  if (rating === null) return "";
+  return "★".repeat(rating) + "☆".repeat(MAX_RATING - rating);
+}
+
+/** A course status as shown to people, e.g. "Published". */
+function statusLabel(status: CourseStatus | null) {
+  if (status === null) return "an unknown status";
+  return status.charAt(0).toUpperCase() + status.slice(1);
 }
 
 function toView(row: NotificationRow): NotificationView {
@@ -419,6 +468,13 @@ function clickTarget(row: NotificationRow): ClickTarget {
       const url = lessonUrl(row.courseSlug, notification.lessonId);
       return { type: "url", url: `${url}#comment-${notification.commentId}` };
     }
+    case NotificationKind.NewRating:
+      return {
+        type: "url",
+        url: `/instructor/analytics?tab=course&course=${notification.courseId}`,
+      };
+    case NotificationKind.CourseStatusChanged:
+      return { type: "url", url: `/instructor/${notification.courseId}` };
     default:
       return { type: "stay" };
   }
