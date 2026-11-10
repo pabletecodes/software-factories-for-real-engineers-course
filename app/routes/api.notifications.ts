@@ -10,6 +10,10 @@ import {
   deleteNotification,
   markAllNotificationsRead,
 } from "~/lib/notifications.server";
+import {
+  deleteNotifications,
+  markNotificationsRead,
+} from "~/lib/notifications.server";
 
 // Changes to the signed-in user's own Notifications, called from the bell.
 // One intent per action; add more alongside "open".
@@ -24,7 +28,23 @@ const notificationActionSchema = z.discriminatedUnion("intent", [
     notificationId: z.coerce.number().int().positive(),
   }),
   z.object({ intent: z.literal("mark-all-read") }),
+  z.object({
+    intent: z.literal("mark-read"),
+    notificationIds: notificationIdList(),
+  }),
+  z.object({
+    intent: z.literal("delete-many"),
+    notificationIds: notificationIdList(),
+  }),
 ]);
+
+/** Several Notification ids sent as one comma-separated field, e.g. "4,7,9". */
+function notificationIdList() {
+  return z
+    .string()
+    .transform((ids) => ids.split(",").map(Number))
+    .pipe(z.array(z.number().int().positive()).min(1));
+}
 
 export async function action({ request }: Route.ActionArgs) {
   const userId = await getCurrentUserId(request);
@@ -64,6 +84,12 @@ export async function action({ request }: Route.ActionArgs) {
     case "mark-all-read": {
       markAllNotificationsRead(db, userId);
       return { ok: true };
+    }
+    case "mark-read": {
+      return markNotificationsRead(db, parsed.data.notificationIds, userId);
+    }
+    case "delete-many": {
+      return deleteNotifications(db, parsed.data.notificationIds, userId);
     }
   }
 }

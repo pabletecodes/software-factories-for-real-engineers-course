@@ -239,3 +239,61 @@ describe("receivableNotificationKinds", () => {
     expect(receivableNotificationKinds(UserRole.Admin)).toEqual([]);
   });
 });
+
+/** The ids of the recipient's Notifications on the first page, newest first. */
+function idsOf(recipientId: number) {
+  return listNotificationsPage(db, recipientId, ALL, 1).notifications.map(
+    (n) => n.id
+  );
+}
+
+describe("markNotificationsRead", () => {
+  it("marks the chosen Notifications read and leaves the rest unread", () => {
+    askQuestions(4);
+    const [a, , c] = idsOf(base.instructor.id);
+
+    expect(markNotificationsRead(db, [a, c], base.instructor.id)).toEqual({
+      ok: true,
+      count: 2,
+    });
+
+    expect(
+      listNotificationsPage(db, base.instructor.id, ALL, 1).notifications.map(
+        (n) => n.read
+      )
+    ).toEqual([true, false, true, false]);
+    expect(countNotifications(db, base.instructor.id).unread).toBe(2);
+  });
+
+  it("leaves another user's Notifications alone", () => {
+    askQuestions(2);
+
+    expect(
+      markNotificationsRead(db, idsOf(base.instructor.id), base.user.id)
+    ).toEqual({ ok: true, count: 0 });
+    expect(countNotifications(db, base.instructor.id).unread).toBe(2);
+  });
+});
+
+describe("deleteNotifications", () => {
+  it("deletes the chosen Notifications for good and keeps the rest", () => {
+    askQuestions(3);
+    const [newest, middle, oldest] = idsOf(base.instructor.id);
+
+    expect(
+      deleteNotifications(db, [newest, oldest], base.instructor.id)
+    ).toEqual({ ok: true, count: 2 });
+
+    expect(idsOf(base.instructor.id)).toEqual([middle]);
+    expect(countNotifications(db, base.instructor.id).total).toBe(1);
+  });
+
+  it("leaves another user's Notifications alone", () => {
+    askQuestions(2);
+
+    expect(
+      deleteNotifications(db, idsOf(base.instructor.id), base.user.id)
+    ).toEqual({ ok: true, count: 0 });
+    expect(countNotifications(db, base.instructor.id).total).toBe(2);
+  });
+});

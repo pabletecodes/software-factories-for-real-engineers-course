@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import {
+  Link,
   useFetcher,
   useFetchers,
   useNavigate,
@@ -34,6 +35,8 @@ import { cn, formatRelativeTime } from "~/lib/utils";
 export type NotificationBellData = {
   unreadCount: number;
   latest: NotificationView[];
+  /** How many Notifications the user has in all, for the footer link. */
+  total: number;
 };
 
 /** The icon, its tint and the plural label of each kind of Notification. */
@@ -149,7 +152,9 @@ function useOptimisticBellData(data: NotificationBellData) {
     ? 0
     : Math.max(0, data.unreadCount - unreadDeleting);
 
-  return { unreadCount, latest };
+  const total = data.total - (data.latest.length - latest.length);
+
+  return { unreadCount, latest, total };
 }
 
 function MarkAllReadButton({ disabled }: { disabled: boolean }) {
@@ -329,6 +334,13 @@ export function NotificationBell({
             ))
           )}
         </ul>
+        <Link
+          to="/notifications"
+          onClick={() => setOpen(false)}
+          className="block border-t px-4 py-2.5 text-center text-xs font-medium text-muted-foreground hover:bg-muted/60 hover:text-foreground"
+        >
+          View all Notifications ({data.total.toLocaleString()})
+        </Link>
       </PopoverContent>
     </Popover>
   );

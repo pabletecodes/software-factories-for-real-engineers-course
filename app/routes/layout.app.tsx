@@ -8,6 +8,7 @@ import {
   type NotificationBellData,
 } from "~/components/notification-bell";
 import {
+  countNotifications,
   countUnreadNotifications,
   listLatestNotifications,
 } from "~/lib/notifications.server";
@@ -36,6 +37,7 @@ function getNotificationBellData(
   return {
     unreadCount: countUnreadNotifications(db, user.id),
     latest: listLatestNotifications(db, user.id),
+    total: countNotifications(db, user.id).total,
   };
 }
 

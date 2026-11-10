@@ -887,3 +887,53 @@ export function receivableNotificationKinds(
       return [];
   }
 }
+
+/** What a bulk action changed: how many of the chosen Notifications. */
+export type BulkNotificationsResult = { ok: true; count: number };
+
+function ownedAmong(notificationIds: number[], recipientId: number) {
+  return and(
+    inArray(notifications.id, notificationIds),
+    eq(notifications.recipientId, recipientId)
+  );
+}
+
+/**
+ * Marks the chosen Notifications read. Only the recipient's own are touched:
+ * another user's ids are skipped.
+ */
+export function markNotificationsRead(
+  db: Db,
+  notificationIds: number[],
+  recipientId: number,
+  now: Date = new Date()
+): BulkNotificationsResult {
+  if (notificationIds.length === 0) return { ok: true, count: 0 };
+  const marked = db
+    .update(notifications)
+    .set({ readAt: now.toISOString() })
+    .where(
+      and(ownedAmong(notificationIds, recipientId), isNull(notifications.readAt))
+    )
+    .returning({ id: notifications.id })
+    .all();
+  return { ok: true, count: marked.length };
+}
+
+/**
+ * Deletes the chosen Notifications for good. Only the recipient's own are
+ * touched: another user's ids are skipped.
+ */
+export function deleteNotifications(
+  db: Db,
+  notificationIds: number[],
+  recipientId: number
+): BulkNotificationsResult {
+  if (notificationIds.length === 0) return { ok: true, count: 0 };
+  const deleted = db
+    .delete(notifications)
+    .where(ownedAmong(notificationIds, recipientId))
+    .returning({ id: notifications.id })
+    .all();
+  return { ok: true, count: deleted.length };
+}

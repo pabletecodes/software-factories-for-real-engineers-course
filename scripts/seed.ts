@@ -2222,6 +2222,47 @@ This course is still in draft while the cluster examples are rewritten against t
     `Created ${countRows(schema.notifications, eq(schema.notifications.kind, NotificationKind.NewRating))} new-rating and ${countRows(schema.notifications, eq(schema.notifications.kind, NotificationKind.CourseStatusChanged))} course-status notifications.`
   );
 
+  // ─── Notifications: a long history (ticket #19) ───
+  // Sarah Chen (instructor1) gets 1,000 older Notifications, so the full
+  // Notifications page has many pages to filter and work through. They repeat
+  // her real question, reply and rating Notifications (same actor, course and
+  // target) at earlier times, one every 17 hours or so, going back about two
+  // years from a month ago. Every 25th is still unread.
+
+  const LONG_HISTORY_SIZE = 1000;
+  const longHistoryTemplates = db
+    .select()
+    .from(schema.notifications)
+    .where(eq(schema.notifications.recipientId, instructor1.id))
+    .all();
+
+  if (longHistoryTemplates.length > 0) {
+    const longHistory = Array.from({ length: LONG_HISTORY_SIZE }, (_, i) => {
+      const {
+        id: _id,
+        createdAt: _createdAt,
+        readAt: _readAt,
+        ...template
+      } = longHistoryTemplates[i % longHistoryTemplates.length];
+      const createdAt = hoursAgo(30 * 24 + i * 17);
+      return {
+        ...template,
+        createdAt,
+        readAt: i % 25 === 0 ? null : createdAt,
+      };
+    });
+    // Insert in chunks to stay under SQLite's bound-parameter limit.
+    for (let start = 0; start < longHistory.length; start += 100) {
+      db.insert(schema.notifications)
+        .values(longHistory.slice(start, start + 100))
+        .run();
+    }
+  }
+
+  console.log(
+    `Created ${countRows(schema.notifications, eq(schema.notifications.recipientId, instructor1.id))} notifications for ${instructor1.name}, including a long history.`
+  );
+
   // ─── Lesson Progress ───
 
   // Helper to mark lessons as complete
