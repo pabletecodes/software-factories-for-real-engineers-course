@@ -1,4 +1,4 @@
-import { and, count, desc, eq, isNull } from "drizzle-orm";
+import { and, count, desc, eq, inArray, isNull } from "drizzle-orm";
 import { alias } from "drizzle-orm/sqlite-core";
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import * as schema from "~/db/schema";
@@ -16,6 +16,7 @@ import {
 } from "~/db/schema";
 import { MAX_COMMENT_LENGTH, MIN_COMMENT_LENGTH } from "~/lib/comments";
 import { MAX_RATING, MIN_RATING } from "~/lib/ratings";
+import { pushHub } from "~/lib/notification-push.server";
 
 // ─── Notifications ───
 // The actions that trigger Notifications (posting a question or a reply,
@@ -85,11 +86,46 @@ function notify(
     (id) => id !== event.actorId
   );
   if (recipients.length > 0) {
-    tx.insert(notifications)
+    const created = tx
+      .insert(notifications)
       .values(recipients.map((recipientId) => ({ ...event, recipientId })))
-      .run();
+      .returning({ id: notifications.id })
+      .all();
+    nudgeAfterCommit(
+      tx,
+      created.map(({ id }) => id)
+    );
   }
   return recipients;
+}
+
+// ─── Nudging recipients ───
+
+/**
+ * Nudges the recipients of newly created Notifications once the write that
+ * created them has committed (ADR 0013). SQLite transactions here are
+ * synchronous, so by the time queued work runs every transaction has either
+ * committed or rolled back. Only Notifications that still exist are nudged,
+ * so a rolled-back write nudges nobody, however deeply it was nested.
+ */
+function nudgeAfterCommit(db: Queryable, notificationIds: number[]) {
+  queueMicrotask(() => {
+    try {
+      const rows = selectNotifications(db)
+        .where(inArray(notifications.id, notificationIds))
+        .all();
+      for (const row of rows) {
+        const view = toView(row);
+        pushHub.publish([row.notification.recipientId], {
+          title: view.title,
+          courseTitle: view.courseTitle,
+        });
+      }
+    } catch (error) {
+      // A nudge is only a hint to refetch; the Notification is stored.
+      console.error("Could not nudge Notification recipients", error);
+    }
+  });
 }
 
 // ─── Posting a question or a reply ───

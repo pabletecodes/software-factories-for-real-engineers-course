@@ -12,6 +12,7 @@ import {
   rateCourse,
   resolveNotificationClick,
 } from "./notifications.server";
+import { pushHub, type Nudge } from "./notification-push.server";
 
 type TestDb = ReturnType<typeof createTestDb>;
 
@@ -449,5 +450,51 @@ describe("deleting a lesson that Notifications reference", () => {
     expect(
       resolveNotificationClick(db, notification.id, base.instructor.id)
     ).toEqual({ ok: true, target: { type: "unavailable" } });
+  });
+});
+
+// ─── Real-time arrival (#13) ───
+
+describe("nudging recipients when Notifications arrive", () => {
+  /** Lets work queued for after the current write run. */
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+  function listen(userId: number) {
+    const received: Nudge[] = [];
+    const unsubscribe = pushHub.subscribe(userId, (nudge) => {
+      received.push(nudge);
+    });
+    return { received, unsubscribe };
+  }
+
+  it("nudges the recipient with the Notification's title and course", async () => {
+    const instructor = listen(base.instructor.id);
+    const student = listen(base.user.id);
+
+    postComment(db, base.user.id, lessonId, null, "What is a closure?");
+    await settle();
+
+    expect(instructor.received).toEqual([
+      { title: "Test User asked a question", courseTitle: "Test Course" },
+    ]);
+    expect(student.received).toEqual([]);
+    instructor.unsubscribe();
+    student.unsubscribe();
+  });
+
+  it("does not nudge anyone when the write is rolled back", async () => {
+    const instructor = listen(base.instructor.id);
+
+    expect(() =>
+      db.transaction(() => {
+        postComment(db, base.user.id, lessonId, null, "What is a closure?");
+        throw new Error("roll back");
+      })
+    ).toThrow("roll back");
+    await settle();
+
+    expect(listLatestNotifications(db, base.instructor.id)).toEqual([]);
+    expect(instructor.received).toEqual([]);
+    instructor.unsubscribe();
   });
 });
