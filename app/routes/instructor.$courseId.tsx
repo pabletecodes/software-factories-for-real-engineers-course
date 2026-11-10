@@ -9,6 +9,7 @@ import {
 } from "@hello-pangea/dnd";
 import type { Route } from "./+types/instructor.$courseId";
 import { getCurrentUserId } from "~/lib/session";
+import { changeCourseStatus } from "~/lib/notifications.server";
 import { CourseStatus, UserRole } from "~/db/schema";
 import { db } from "~/db";
 import {
@@ -146,15 +147,6 @@ function updateCourse(id: number, title: string, description: string) {
   return db
     .update(courses)
     .set({ title, description, updatedAt: new Date().toISOString() })
-    .where(eq(courses.id, id))
-    .returning()
-    .get();
-}
-
-function updateCourseStatus(id: number, status: CourseStatus) {
-  return db
-    .update(courses)
-    .set({ status, updatedAt: new Date().toISOString() })
     .where(eq(courses.id, id))
     .returning()
     .get();
@@ -693,7 +685,15 @@ export async function action({ params, request }: Route.ActionArgs) {
   }
 
   if (intent === "update-status") {
-    updateCourseStatus(courseId, parsed.data.status);
+    const result = changeCourseStatus(
+      db,
+      courseId,
+      currentUserId,
+      parsed.data.status
+    );
+    if (!result.ok) {
+      return data({ error: result.error }, { status: result.status });
+    }
     return { success: true, field: "status" };
   }
 

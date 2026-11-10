@@ -8,6 +8,7 @@ import {
   lessons,
   modules,
   users,
+  CourseStatus,
   UserRole,
 } from "~/db/schema";
 import { MAX_COMMENT_LENGTH, MIN_COMMENT_LENGTH } from "~/lib/comments";
@@ -216,4 +217,43 @@ export function rateCourse(
     .returning()
     .get();
   return { ok: true, rating };
+}
+
+// ─── Changing a course's status ───
+
+type Course = typeof courses.$inferSelect;
+
+export type ChangeCourseStatusResult = { ok: true; course: Course } | Failure;
+
+/**
+ * Moves a course between Draft, Published and Archived. Only its Instructor or
+ * a Platform Admin may.
+ */
+export function changeCourseStatus(
+  db: Db,
+  courseId: number,
+  changerId: number,
+  status: CourseStatus
+): ChangeCourseStatusResult {
+  const existing = getCourse(db, courseId);
+  if (!existing) {
+    return { ok: false, status: 404, error: "Course not found." };
+  }
+
+  if (existing.instructorId !== changerId && !isPlatformAdmin(db, changerId)) {
+    return {
+      ok: false,
+      status: 403,
+      error: "You can only edit your own courses.",
+    };
+  }
+
+  const course = db
+    .update(courses)
+    .set({ status, updatedAt: new Date().toISOString() })
+    .where(eq(courses.id, courseId))
+    .returning()
+    .get();
+
+  return { ok: true, course };
 }

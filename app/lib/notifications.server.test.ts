@@ -1,8 +1,13 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { createTestDb, seedBaseData } from "~/test/setup";
 import * as schema from "~/db/schema";
-import { UserRole } from "~/db/schema";
-import { deletePost, postComment, rateCourse } from "./notifications.server";
+import { CourseStatus, UserRole } from "~/db/schema";
+import {
+  changeCourseStatus,
+  deletePost,
+  postComment,
+  rateCourse,
+} from "./notifications.server";
 
 type TestDb = ReturnType<typeof createTestDb>;
 
@@ -236,5 +241,46 @@ describe("rateCourse", () => {
       status: 404,
       error: "Course not found",
     });
+  });
+});
+
+describe("changeCourseStatus", () => {
+  it("lets a Platform Admin change a course's status", () => {
+    const admin = addUser("Pat", UserRole.Admin);
+
+    expect(
+      changeCourseStatus(db, base.course.id, admin.id, CourseStatus.Archived)
+    ).toMatchObject({ ok: true, course: { status: CourseStatus.Archived } });
+  });
+
+  it("lets the course's Instructor change its status", () => {
+    expect(
+      changeCourseStatus(
+        db,
+        base.course.id,
+        base.instructor.id,
+        CourseStatus.Draft
+      )
+    ).toMatchObject({ ok: true, course: { status: CourseStatus.Draft } });
+  });
+
+  it("refuses anyone else", () => {
+    const otherInstructor = addUser("Ivy", UserRole.Instructor);
+
+    for (const userId of [base.user.id, otherInstructor.id]) {
+      expect(
+        changeCourseStatus(db, base.course.id, userId, CourseStatus.Draft)
+      ).toEqual({
+        ok: false,
+        status: 403,
+        error: "You can only edit your own courses.",
+      });
+    }
+  });
+
+  it("refuses a course that does not exist", () => {
+    expect(
+      changeCourseStatus(db, 9999, base.instructor.id, CourseStatus.Draft)
+    ).toEqual({ ok: false, status: 404, error: "Course not found." });
   });
 });
