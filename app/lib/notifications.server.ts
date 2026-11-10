@@ -1,4 +1,5 @@
 import { and, count, desc, eq, isNull, or } from "drizzle-orm";
+import { inArray, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/sqlite-core";
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import * as schema from "~/db/schema";
@@ -675,4 +676,127 @@ export function markAllNotificationsRead(
     )
     .run();
   return { ok: true };
+}
+
+// ─── The full Notifications page ───
+
+export const NOTIFICATIONS_PAGE_SIZE = 50;
+
+/** Narrows a recipient's Notifications: to unread ones, to one kind, or both. */
+export type NotificationFilter = {
+  unreadOnly: boolean;
+  kind: NotificationKind | null;
+};
+
+export type NotificationsPage = {
+  notifications: NotificationView[];
+  /** How many Notifications match the filter, on every page. */
+  total: number;
+  /** The page shown, from 1; a page past the end shows the last one. */
+  page: number;
+  pageCount: number;
+};
+
+function matchingFilter(recipientId: number, filter: NotificationFilter) {
+  return and(
+    eq(notifications.recipientId, recipientId),
+    filter.unreadOnly ? isNull(notifications.readAt) : undefined,
+    filter.kind ? eq(notifications.kind, filter.kind) : undefined
+  );
+}
+
+/**
+ * One page of a recipient's Notifications that match a filter, newest first,
+ * NOTIFICATIONS_PAGE_SIZE to a page.
+ */
+export function listNotificationsPage(
+  db: Queryable,
+  recipientId: number,
+  filter: NotificationFilter,
+  page: number
+): NotificationsPage {
+  const where = matchingFilter(recipientId, filter);
+  const total = db
+    .select({ n: count() })
+    .from(notifications)
+    .where(where)
+    .get()!.n;
+  const pageCount = Math.max(1, Math.ceil(total / NOTIFICATIONS_PAGE_SIZE));
+  const shown = Math.min(Math.max(1, Math.floor(page) || 1), pageCount);
+
+  const rows = selectNotifications(db)
+    .where(where)
+    .orderBy(desc(notifications.createdAt), desc(notifications.id))
+    .limit(NOTIFICATIONS_PAGE_SIZE)
+    .offset((shown - 1) * NOTIFICATIONS_PAGE_SIZE)
+    .all();
+
+  return { notifications: rows.map(toView), total, page: shown, pageCount };
+}
+
+/** How many Notifications a recipient has, in all and of each kind. */
+export type NotificationCounts = {
+  total: number;
+  unread: number;
+  byKind: Record<NotificationKind, number>;
+  unreadByKind: Record<NotificationKind, number>;
+};
+
+function zeroPerKind(): Record<NotificationKind, number> {
+  return Object.fromEntries(
+    Object.values(NotificationKind).map((kind) => [kind, 0])
+  ) as Record<NotificationKind, number>;
+}
+
+/** Counts a recipient's Notifications: in all, unread, and per kind. */
+export function countNotifications(
+  db: Queryable,
+  recipientId: number
+): NotificationCounts {
+  const rows = db
+    .select({
+      kind: notifications.kind,
+      total: count(),
+      unread: sql<number>`sum(case when ${notifications.readAt} is null then 1 else 0 end)`,
+    })
+    .from(notifications)
+    .where(eq(notifications.recipientId, recipientId))
+    .groupBy(notifications.kind)
+    .all();
+
+  const counts: NotificationCounts = {
+    total: 0,
+    unread: 0,
+    byKind: zeroPerKind(),
+    unreadByKind: zeroPerKind(),
+  };
+  for (const row of rows) {
+    counts.total += row.total;
+    counts.unread += row.unread;
+    counts.byKind[row.kind] = row.total;
+    counts.unreadByKind[row.kind] = row.unread;
+  }
+  return counts;
+}
+
+/**
+ * The kinds of Notification someone in this role can receive, in the order
+ * the page shows them. Platform Admins receive none.
+ */
+export function receivableNotificationKinds(
+  role: UserRole
+): NotificationKind[] {
+  switch (role) {
+    case UserRole.Student:
+      return [NotificationKind.Reply, NotificationKind.PostDeleted];
+    case UserRole.Instructor:
+      return [
+        NotificationKind.Reply,
+        NotificationKind.NewQuestion,
+        NotificationKind.NewRating,
+        NotificationKind.CourseStatusChanged,
+      ];
+    default:
+      return [];
+  }
 }
