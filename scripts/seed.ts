@@ -13,6 +13,7 @@ import {
   RefundStatus,
   QuestionType,
   TeamMemberRole,
+  NotificationKind,
 } from "../app/db/schema";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -65,6 +66,7 @@ async function seed() {
 
   // Drop and recreate tables for a clean seed
   sqlite.exec(`
+    DROP TABLE IF EXISTS notifications;
     DROP TABLE IF EXISTS comments;
     DROP TABLE IF EXISTS course_ratings;
     DROP TABLE IF EXISTS video_watch_events;
@@ -1994,6 +1996,49 @@ This course is still in draft while the cluster examples are rewritten against t
     `Created ${countRows(schema.comments)} lesson comments across ${countRows(schema.comments, isNull(schema.comments.parentId))} threads.`
   );
 
+  // ─── Notifications ───
+  // A "new question" Notification for the course's Instructor for every
+  // question someone else asked, at the time it was asked. Questions from the
+  // last 10 days are still unread, so each seeded Instructor's bell has a badge.
+
+  const questions = db
+    .select({
+      commentId: schema.comments.id,
+      lessonId: schema.comments.lessonId,
+      authorId: schema.comments.userId,
+      createdAt: schema.comments.createdAt,
+      courseId: schema.courses.id,
+      instructorId: schema.courses.instructorId,
+    })
+    .from(schema.comments)
+    .innerJoin(schema.lessons, eq(schema.comments.lessonId, schema.lessons.id))
+    .innerJoin(schema.modules, eq(schema.lessons.moduleId, schema.modules.id))
+    .innerJoin(schema.courses, eq(schema.modules.courseId, schema.courses.id))
+    .where(isNull(schema.comments.parentId))
+    .all();
+
+  for (const question of questions) {
+    if (question.authorId === question.instructorId) continue;
+    const askedDaysAgo =
+      (Date.now() - Date.parse(question.createdAt)) / 86_400_000;
+    db.insert(schema.notifications)
+      .values({
+        recipientId: question.instructorId,
+        actorId: question.authorId,
+        kind: NotificationKind.NewQuestion,
+        courseId: question.courseId,
+        lessonId: question.lessonId,
+        commentId: question.commentId,
+        createdAt: question.createdAt,
+        readAt: askedDaysAgo < 10 ? null : question.createdAt,
+      })
+      .run();
+  }
+
+  console.log(
+    `Created ${countRows(schema.notifications)} notifications (${countRows(schema.notifications, isNull(schema.notifications.readAt))} unread).`
+  );
+
   // ─── Lesson Progress ───
 
   // Helper to mark lessons as complete
@@ -2840,6 +2885,9 @@ This course is still in draft while the cluster examples are rewritten against t
   console.log(`  Enrollments: ${countRows(schema.enrollments)}`);
   console.log(`  Course ratings: ${countRows(schema.courseRatings)}`);
   console.log(`  Lesson comments: ${countRows(schema.comments)}`);
+  console.log(
+    `  Notifications: ${countRows(schema.notifications)} (${countRows(schema.notifications, isNull(schema.notifications.readAt))} unread)`
+  );
   console.log(
     `  Lesson progress: ${countRows(schema.lessonProgress)} (${countRows(schema.lessonProgress, eq(schema.lessonProgress.status, LessonProgressStatus.Completed))} completed)`
   );
