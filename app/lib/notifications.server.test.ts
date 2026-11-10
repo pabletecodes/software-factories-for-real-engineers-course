@@ -337,6 +337,116 @@ describe("Notifications for a new question", () => {
   });
 });
 
+describe("Notifications for a reply", () => {
+  function post(authorId: number, parentId: number | null, body = "Hi") {
+    const result = postComment(db, authorId, lessonId, parentId, body);
+    if (!result.ok) throw new Error(result.error);
+    return result.comment;
+  }
+
+  function replies(recipientId: number) {
+    return listLatestNotifications(db, recipientId).filter(
+      (n) => n.kind === NotificationKind.Reply
+    );
+  }
+
+  it("notifies whoever asked the question", () => {
+    const question = post(base.user.id, null);
+    post(base.instructor.id, question.id, "Like this.");
+
+    expect(replies(base.user.id)).toEqual([
+      expect.objectContaining({
+        kind: NotificationKind.Reply,
+        read: false,
+        title: "Test Instructor replied to your question",
+        excerpt: "Like this.",
+        courseTitle: "Test Course",
+      }),
+    ]);
+  });
+
+  it("notifies earlier repliers, and never whoever replied", () => {
+    const emma = addUser("Emma");
+    const james = addUser("James");
+    const question = post(base.user.id, null);
+    post(emma.id, question.id, "Me too.");
+    post(james.id, question.id, "Try this.");
+
+    expect(replies(emma.id)).toEqual([
+      expect.objectContaining({
+        title: "James replied in a thread you posted in",
+        excerpt: "Try this.",
+      }),
+    ]);
+    expect(replies(base.user.id).map((n) => n.excerpt)).toEqual([
+      "Try this.",
+      "Me too.",
+    ]);
+    expect(replies(james.id)).toEqual([]);
+  });
+
+  it("notifies someone who posted several times once per reply", () => {
+    const emma = addUser("Emma");
+    const question = post(base.user.id, null);
+    post(base.user.id, question.id, "Any ideas?");
+    post(base.user.id, question.id, "Still stuck.");
+    post(emma.id, question.id, "Here's how.");
+
+    expect(replies(base.user.id).map((n) => n.excerpt)).toEqual([
+      "Here's how.",
+    ]);
+  });
+
+  it("notifies only the others when the asker replies to their own question", () => {
+    const emma = addUser("Emma");
+    const question = post(base.user.id, null);
+    post(emma.id, question.id, "Me too.");
+    post(base.user.id, question.id, "Solved it.");
+
+    expect(replies(base.user.id).map((n) => n.excerpt)).toEqual(["Me too."]);
+    expect(replies(emma.id)).toEqual([
+      expect.objectContaining({
+        title: "Test User replied in a thread you posted in",
+      }),
+    ]);
+  });
+
+  it("notifies the Instructor only once they've posted in the thread", () => {
+    const emma = addUser("Emma");
+    const question = post(base.user.id, null);
+    post(emma.id, question.id, "Me too.");
+
+    expect(replies(base.instructor.id)).toEqual([]);
+
+    post(base.instructor.id, question.id, "Like this.");
+    post(emma.id, question.id, "Thanks!");
+
+    expect(replies(base.instructor.id)).toEqual([
+      expect.objectContaining({ excerpt: "Thanks!" }),
+    ]);
+  });
+
+  it("leads a click to the reply on its lesson", () => {
+    db.insert(schema.enrollments)
+      .values({ userId: base.user.id, courseId: base.course.id })
+      .run();
+    const question = post(base.user.id, null);
+    const reply = post(base.instructor.id, question.id, "Like this.");
+    const [notification] = replies(base.user.id);
+
+    expect(resolveNotificationClick(db, notification.id, base.user.id)).toEqual(
+      {
+        ok: true,
+        target: {
+          type: "url",
+          url: `/courses/test-course/lessons/${lessonId}#comment-${reply.id}`,
+        },
+      }
+    );
+    expect(countUnreadNotifications(db, base.user.id)).toBe(0);
+  });
+});
+
 describe("listLatestNotifications", () => {
   it("lists the latest 20, newest first", () => {
     for (let i = 1; i <= 25; i++) {
@@ -423,6 +533,76 @@ describe("resolveNotificationClick", () => {
       status: 404,
       error: "Notification not found",
     });
+  });
+});
+
+describe("clicking a Notification whose target is gone", () => {
+  function askAndGetNotificationId() {
+    const result = postComment(db, base.user.id, lessonId, null, "How?");
+    if (!result.ok) throw new Error(result.error);
+    const [notification] = listLatestNotifications(db, base.instructor.id);
+    return { questionId: result.comment.id, notificationId: notification.id };
+  }
+
+  it("leads to the lesson with no anchor once the comment was deleted", () => {
+    const { questionId, notificationId } = askAndGetNotificationId();
+    deletePost(db, questionId, base.user.id);
+
+    expect(
+      resolveNotificationClick(db, notificationId, base.instructor.id)
+    ).toEqual({
+      ok: true,
+      target: { type: "url", url: `/courses/test-course/lessons/${lessonId}` },
+    });
+    expect(countUnreadNotifications(db, base.instructor.id)).toBe(0);
+  });
+
+  it("leads a reply to the lesson with no anchor once the reply was deleted", () => {
+    const question = postComment(db, base.instructor.id, lessonId, null, "Q?");
+    if (!question.ok) throw new Error(question.error);
+    const reply = postComment(
+      db,
+      base.user.id,
+      lessonId,
+      question.comment.id,
+      "A."
+    );
+    if (!reply.ok) throw new Error(reply.error);
+    const [notification] = listLatestNotifications(db, base.instructor.id);
+    deletePost(db, reply.comment.id, base.user.id);
+
+    expect(
+      resolveNotificationClick(db, notification.id, base.instructor.id)
+    ).toEqual({
+      ok: true,
+      target: { type: "url", url: `/courses/test-course/lessons/${lessonId}` },
+    });
+  });
+
+  it("is no longer available once the lesson was deleted", () => {
+    const { notificationId } = askAndGetNotificationId();
+    // Deleting a lesson does not clean up its comments; take them out first.
+    db.delete(schema.comments).run();
+    db.delete(schema.lessons).where(eq(schema.lessons.id, lessonId)).run();
+
+    expect(
+      resolveNotificationClick(db, notificationId, base.instructor.id)
+    ).toEqual({ ok: true, target: { type: "unavailable" } });
+    expect(countUnreadNotifications(db, base.instructor.id)).toBe(0);
+  });
+
+  it("is no longer available to someone who can no longer see the course", () => {
+    const { notificationId } = askAndGetNotificationId();
+    const newInstructor = addUser("Nadia", UserRole.Instructor);
+    db.update(schema.courses)
+      .set({ instructorId: newInstructor.id })
+      .where(eq(schema.courses.id, base.course.id))
+      .run();
+
+    expect(
+      resolveNotificationClick(db, notificationId, base.instructor.id)
+    ).toEqual({ ok: true, target: { type: "unavailable" } });
+    expect(countUnreadNotifications(db, base.instructor.id)).toBe(0);
   });
 });
 
