@@ -1,4 +1,4 @@
-import { and, count, desc, eq, isNull } from "drizzle-orm";
+import { and, count, desc, eq, isNull, or } from "drizzle-orm";
 import { alias } from "drizzle-orm/sqlite-core";
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import * as schema from "~/db/schema";
@@ -160,10 +160,31 @@ export function postComment(
         lessonId,
         commentId: comment.id,
       });
+    } else {
+      notify(tx, threadParticipantIds(tx, parentId), {
+        kind: NotificationKind.Reply,
+        actorId: authorId,
+        courseId: course.courseId,
+        lessonId,
+        commentId: comment.id,
+      });
     }
 
     return { ok: true, comment };
   });
+}
+
+/**
+ * Everyone who has posted in a question's thread: whoever asked it and every
+ * author of a reply to it, deleted posts included.
+ */
+function threadParticipantIds(db: Queryable, questionId: number): number[] {
+  return db
+    .select({ userId: comments.userId })
+    .from(comments)
+    .where(or(eq(comments.id, questionId), eq(comments.parentId, questionId)))
+    .all()
+    .map((row) => row.userId);
 }
 
 // ─── Deleting a post ───
@@ -323,6 +344,7 @@ export type NotificationView = {
 export const LATEST_NOTIFICATIONS_LIMIT = 20;
 
 const actors = alias(users, "actors");
+const questions = alias(comments, "questions");
 
 /**
  * Selects Notifications with everything needed to describe them, and to work
@@ -338,12 +360,14 @@ function selectNotifications(db: Queryable) {
       lessonExists: lessons.id,
       commentBody: comments.body,
       commentDeletedAt: comments.deletedAt,
+      questionAuthorId: questions.userId,
     })
     .from(notifications)
     .innerJoin(actors, eq(notifications.actorId, actors.id))
     .innerJoin(courses, eq(notifications.courseId, courses.id))
     .leftJoin(lessons, eq(notifications.lessonId, lessons.id))
-    .leftJoin(comments, eq(notifications.commentId, comments.id));
+    .leftJoin(comments, eq(notifications.commentId, comments.id))
+    .leftJoin(questions, eq(comments.parentId, questions.id));
 }
 
 type NotificationRow = ReturnType<
@@ -359,6 +383,14 @@ function describeNotification(
     case NotificationKind.NewQuestion:
       return {
         title: `${actorName} asked a question`,
+        excerpt: row.commentBody,
+      };
+    case NotificationKind.Reply:
+      return {
+        title:
+          row.questionAuthorId === notification.recipientId
+            ? `${actorName} replied to your question`
+            : `${actorName} replied in a thread you posted in`,
         excerpt: row.commentBody,
       };
     default:
@@ -413,6 +445,13 @@ function clickTarget(row: NotificationRow): ClickTarget {
   const { notification } = row;
   switch (notification.kind) {
     case NotificationKind.NewQuestion: {
+      if (notification.lessonId === null || row.lessonExists === null) {
+        return { type: "unavailable" };
+      }
+      const url = lessonUrl(row.courseSlug, notification.lessonId);
+      return { type: "url", url: `${url}#comment-${notification.commentId}` };
+    }
+    case NotificationKind.Reply: {
       if (notification.lessonId === null || row.lessonExists === null) {
         return { type: "unavailable" };
       }
