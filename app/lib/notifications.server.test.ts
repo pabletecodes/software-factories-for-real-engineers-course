@@ -336,6 +336,113 @@ describe("Notifications for a new question", () => {
   });
 });
 
+describe("Notifications for a reply", () => {
+  function post(authorId: number, parentId: number | null, body = "Hi") {
+    const result = postComment(db, authorId, lessonId, parentId, body);
+    if (!result.ok) throw new Error(result.error);
+    return result.comment;
+  }
+
+  function replies(recipientId: number) {
+    return listLatestNotifications(db, recipientId).filter(
+      (n) => n.kind === NotificationKind.Reply
+    );
+  }
+
+  it("notifies whoever asked the question", () => {
+    const question = post(base.user.id, null);
+    post(base.instructor.id, question.id, "Like this.");
+
+    expect(replies(base.user.id)).toEqual([
+      expect.objectContaining({
+        kind: NotificationKind.Reply,
+        read: false,
+        title: "Test Instructor replied to your question",
+        excerpt: "Like this.",
+        courseTitle: "Test Course",
+      }),
+    ]);
+  });
+
+  it("notifies earlier repliers, and never whoever replied", () => {
+    const emma = addUser("Emma");
+    const james = addUser("James");
+    const question = post(base.user.id, null);
+    post(emma.id, question.id, "Me too.");
+    post(james.id, question.id, "Try this.");
+
+    expect(replies(emma.id)).toEqual([
+      expect.objectContaining({
+        title: "James replied in a thread you posted in",
+        excerpt: "Try this.",
+      }),
+    ]);
+    expect(replies(base.user.id).map((n) => n.excerpt)).toEqual([
+      "Try this.",
+      "Me too.",
+    ]);
+    expect(replies(james.id)).toEqual([]);
+  });
+
+  it("notifies someone who posted several times once per reply", () => {
+    const emma = addUser("Emma");
+    const question = post(base.user.id, null);
+    post(base.user.id, question.id, "Any ideas?");
+    post(base.user.id, question.id, "Still stuck.");
+    post(emma.id, question.id, "Here's how.");
+
+    expect(replies(base.user.id).map((n) => n.excerpt)).toEqual([
+      "Here's how.",
+    ]);
+  });
+
+  it("notifies only the others when the asker replies to their own question", () => {
+    const emma = addUser("Emma");
+    const question = post(base.user.id, null);
+    post(emma.id, question.id, "Me too.");
+    post(base.user.id, question.id, "Solved it.");
+
+    expect(replies(base.user.id).map((n) => n.excerpt)).toEqual(["Me too."]);
+    expect(replies(emma.id)).toEqual([
+      expect.objectContaining({
+        title: "Test User replied in a thread you posted in",
+      }),
+    ]);
+  });
+
+  it("notifies the Instructor only once they've posted in the thread", () => {
+    const emma = addUser("Emma");
+    const question = post(base.user.id, null);
+    post(emma.id, question.id, "Me too.");
+
+    expect(replies(base.instructor.id)).toEqual([]);
+
+    post(base.instructor.id, question.id, "Like this.");
+    post(emma.id, question.id, "Thanks!");
+
+    expect(replies(base.instructor.id)).toEqual([
+      expect.objectContaining({ excerpt: "Thanks!" }),
+    ]);
+  });
+
+  it("leads a click to the reply on its lesson", () => {
+    const question = post(base.user.id, null);
+    const reply = post(base.instructor.id, question.id, "Like this.");
+    const [notification] = replies(base.user.id);
+
+    expect(
+      resolveNotificationClick(db, notification.id, base.user.id)
+    ).toEqual({
+      ok: true,
+      target: {
+        type: "url",
+        url: `/courses/test-course/lessons/${lessonId}#comment-${reply.id}`,
+      },
+    });
+    expect(countUnreadNotifications(db, base.user.id)).toBe(0);
+  });
+});
+
 describe("listLatestNotifications", () => {
   it("lists the latest 20, newest first", () => {
     for (let i = 1; i <= 25; i++) {
@@ -515,8 +622,12 @@ describe("Notifications for a deleted post", () => {
 
     deletePost(db, question.id, base.instructor.id);
 
-    expect(countUnreadNotifications(db, base.user.id)).toBe(1);
-    expect(listLatestNotifications(db, replier.id)).toEqual([]);
+    const deletedKinds = (userId: number) =>
+      listLatestNotifications(db, userId)
+        .map((n) => n.kind)
+        .filter((kind) => kind === NotificationKind.PostDeleted);
+    expect(deletedKinds(base.user.id)).toEqual([NotificationKind.PostDeleted]);
+    expect(deletedKinds(replier.id)).toEqual([]);
   });
 
   it("keeps a long post's excerpt short", () => {
