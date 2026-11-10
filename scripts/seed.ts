@@ -2035,6 +2035,66 @@ This course is still in draft while the cluster examples are rewritten against t
       .run();
   }
 
+  // ─── Notifications: replies (ticket #14) ───
+  // A "reply" Notification for everyone who had posted in a thread before each
+  // seeded reply (the asker and earlier repliers), except whoever replied.
+  // Replies from the last 10 days are still unread.
+
+  const seededReplies = db
+    .select({
+      commentId: schema.comments.id,
+      questionId: schema.comments.parentId,
+      lessonId: schema.comments.lessonId,
+      authorId: schema.comments.userId,
+      createdAt: schema.comments.createdAt,
+      courseId: schema.courses.id,
+    })
+    .from(schema.comments)
+    .innerJoin(schema.lessons, eq(schema.comments.lessonId, schema.lessons.id))
+    .innerJoin(schema.modules, eq(schema.lessons.moduleId, schema.modules.id))
+    .innerJoin(schema.courses, eq(schema.modules.courseId, schema.courses.id))
+    .where(isNotNull(schema.comments.parentId))
+    .all();
+
+  const threadPosts = db
+    .select({
+      id: schema.comments.id,
+      parentId: schema.comments.parentId,
+      userId: schema.comments.userId,
+    })
+    .from(schema.comments)
+    .all();
+
+  for (const reply of seededReplies) {
+    const earlierAuthors = new Set(
+      threadPosts
+        .filter(
+          (post) =>
+            (post.id === reply.questionId ||
+              post.parentId === reply.questionId) &&
+            post.id < reply.commentId
+        )
+        .map((post) => post.userId)
+    );
+    earlierAuthors.delete(reply.authorId);
+    const repliedDaysAgo =
+      (Date.now() - Date.parse(reply.createdAt)) / 86_400_000;
+    for (const recipientId of earlierAuthors) {
+      db.insert(schema.notifications)
+        .values({
+          recipientId,
+          actorId: reply.authorId,
+          kind: NotificationKind.Reply,
+          courseId: reply.courseId,
+          lessonId: reply.lessonId,
+          commentId: reply.commentId,
+          createdAt: reply.createdAt,
+          readAt: repliedDaysAgo < 10 ? null : reply.createdAt,
+        })
+        .run();
+    }
+  }
+
   console.log(
     `Created ${countRows(schema.notifications)} notifications (${countRows(schema.notifications, isNull(schema.notifications.readAt))} unread).`
   );
