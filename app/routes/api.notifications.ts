@@ -6,6 +6,10 @@ import { resolveCountry } from "~/lib/country.server";
 import { getCurrentUserId } from "~/lib/session";
 import { parseFormData } from "~/lib/validation";
 import { resolveNotificationClick } from "~/lib/notifications.server";
+import {
+  deleteNotification,
+  markAllNotificationsRead,
+} from "~/lib/notifications.server";
 
 // Changes to the signed-in user's own Notifications, called from the bell.
 // One intent per action; add more alongside "open".
@@ -15,6 +19,11 @@ const notificationActionSchema = z.discriminatedUnion("intent", [
     intent: z.literal("open"),
     notificationId: z.coerce.number().int().positive(),
   }),
+  z.object({
+    intent: z.literal("delete"),
+    notificationId: z.coerce.number().int().positive(),
+  }),
+  z.object({ intent: z.literal("mark-all-read") }),
 ]);
 
 export async function action({ request }: Route.ActionArgs) {
@@ -44,6 +53,17 @@ export async function action({ request }: Route.ActionArgs) {
         throw data(result.error, { status: result.status });
       }
       return { target: result.target };
+    }
+    case "delete": {
+      const result = deleteNotification(db, parsed.data.notificationId, userId);
+      if (!result.ok) {
+        throw data(result.error, { status: result.status });
+      }
+      return { ok: true };
+    }
+    case "mark-all-read": {
+      markAllNotificationsRead(db, userId);
+      return { ok: true };
     }
   }
 }

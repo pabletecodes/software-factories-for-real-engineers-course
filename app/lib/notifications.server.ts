@@ -629,3 +629,50 @@ export function countUnreadNotifications(
     )
     .get()!.n;
 }
+
+// ─── Managing Notifications ───
+
+export type ManageNotificationsResult = { ok: true } | Failure;
+
+/**
+ * Deletes one of a recipient's Notifications for good. Another user's
+ * Notification is "not found".
+ */
+export function deleteNotification(
+  db: Db,
+  notificationId: number,
+  recipientId: number
+): ManageNotificationsResult {
+  const deleted = db
+    .delete(notifications)
+    .where(
+      and(
+        eq(notifications.id, notificationId),
+        eq(notifications.recipientId, recipientId)
+      )
+    )
+    .returning({ id: notifications.id })
+    .all();
+  if (deleted.length === 0) {
+    return { ok: false, status: 404, error: "Notification not found" };
+  }
+  return { ok: true };
+}
+
+/** Marks every one of a recipient's unread Notifications read. */
+export function markAllNotificationsRead(
+  db: Db,
+  recipientId: number,
+  now: Date = new Date()
+): ManageNotificationsResult {
+  db.update(notifications)
+    .set({ readAt: now.toISOString() })
+    .where(
+      and(
+        eq(notifications.recipientId, recipientId),
+        isNull(notifications.readAt)
+      )
+    )
+    .run();
+  return { ok: true };
+}

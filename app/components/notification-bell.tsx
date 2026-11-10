@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import { useFetcher, useNavigate } from "react-router";
+import { useFetcher, useFetchers, useNavigate } from "react-router";
 import { toast } from "sonner";
 import {
   ArrowRightLeft,
   Bell,
+  CheckCheck,
+  X,
   HelpCircle,
   MessageSquare,
   Star,
@@ -108,6 +110,86 @@ export function useOpenNotification() {
     );
 }
 
+// ─── Managing Notifications ───
+
+const NOTIFICATIONS_ACTION = "/api/notifications";
+
+/**
+ * What the dropdown shows while a Delete or Mark all read is on its way, so
+ * the badge and list change straight away rather than after the round trip.
+ */
+function useOptimisticBellData(data: NotificationBellData) {
+  const pending = useFetchers().filter(
+    (fetcher) => fetcher.formAction === NOTIFICATIONS_ACTION && fetcher.formData
+  );
+  const deletingIds = new Set(
+    pending
+      .filter((fetcher) => fetcher.formData!.get("intent") === "delete")
+      .map((fetcher) => Number(fetcher.formData!.get("notificationId")))
+  );
+  const markingAllRead = pending.some(
+    (fetcher) => fetcher.formData!.get("intent") === "mark-all-read"
+  );
+
+  const latest = data.latest
+    .filter((notification) => !deletingIds.has(notification.id))
+    .map((notification) =>
+      markingAllRead ? { ...notification, read: true } : notification
+    );
+  const unreadDeleting = data.latest.filter(
+    (notification) => deletingIds.has(notification.id) && !notification.read
+  ).length;
+  const unreadCount = markingAllRead
+    ? 0
+    : Math.max(0, data.unreadCount - unreadDeleting);
+
+  return { unreadCount, latest };
+}
+
+function MarkAllReadButton({ disabled }: { disabled: boolean }) {
+  const fetcher = useFetcher();
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={() =>
+        fetcher.submit(
+          { intent: "mark-all-read" },
+          { method: "post", action: NOTIFICATIONS_ACTION }
+        )
+      }
+      className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
+    >
+      <CheckCheck className="size-3.5" />
+      Mark all read
+    </button>
+  );
+}
+
+function DeleteNotificationButton({
+  notification,
+}: {
+  notification: NotificationView;
+}) {
+  const fetcher = useFetcher();
+  return (
+    <button
+      type="button"
+      onClick={() =>
+        fetcher.submit(
+          { intent: "delete", notificationId: notification.id },
+          { method: "post", action: NOTIFICATIONS_ACTION }
+        )
+      }
+      className="absolute right-3 top-2.5 hidden rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground group-hover:block focus-visible:block"
+      aria-label={`Delete Notification: ${notification.title}`}
+      title="Delete"
+    >
+      <X className="size-3.5" />
+    </button>
+  );
+}
+
 function NotificationRow({
   notification,
   onOpen,
@@ -117,12 +199,12 @@ function NotificationRow({
 }) {
   const unread = !notification.read;
   return (
-    <li>
+    <li className="group relative">
       <button
         type="button"
         onClick={() => onOpen(notification.id)}
         className={cn(
-          "group flex w-full gap-3 border-b px-4 py-3 text-left hover:bg-muted/60",
+          "flex w-full gap-3 border-b px-4 py-3 text-left hover:bg-muted/60",
           unread && "bg-blue-50/60 dark:bg-blue-950/20"
         )}
       >
@@ -144,17 +226,23 @@ function NotificationRow({
         <div className="flex w-5 shrink-0 justify-center">
           {unread && (
             <span
-              className="mt-1.5 size-2 rounded-full bg-blue-500"
+              className="mt-1.5 size-2 rounded-full bg-blue-500 group-hover:invisible"
               aria-label="Unread"
             />
           )}
         </div>
       </button>
+      <DeleteNotificationButton notification={notification} />
     </li>
   );
 }
 
-export function NotificationBell({ data }: { data: NotificationBellData }) {
+export function NotificationBell({
+  data: loaded,
+}: {
+  data: NotificationBellData;
+}) {
+  const data = useOptimisticBellData(loaded);
   const [open, setOpen] = useState(false);
   const openNotification = useOpenNotification();
 
@@ -184,11 +272,12 @@ export function NotificationBell({ data }: { data: NotificationBellData }) {
       >
         <div className="flex items-center justify-between border-b px-4 py-2.5">
           <span className="text-sm font-semibold">Notifications</span>
+          <MarkAllReadButton disabled={data.unreadCount === 0} />
         </div>
         <ul className="max-h-[28rem] overflow-y-auto [&>li:last-child>button]:border-0">
           {data.latest.length === 0 ? (
             <li className="px-4 py-10 text-center text-sm text-muted-foreground">
-              You're all caught up.
+              You have no Notifications.
             </li>
           ) : (
             data.latest.map((notification) => (
