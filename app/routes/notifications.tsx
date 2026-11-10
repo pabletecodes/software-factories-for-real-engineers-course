@@ -250,9 +250,19 @@ export default function NotificationsPage({
       </div>
 
       <table className="w-full table-fixed text-sm">
+        {/* A fixed layout takes column widths from the first row, which is the
+            header's spanning bulk-action cell, so they are set here. */}
+        <colgroup>
+          <col className="w-8" />
+          <col className="w-5" />
+          <col className="w-7" />
+          <col />
+          <col className="w-56" />
+          <col className="w-20" />
+        </colgroup>
         <thead>
           <tr className="border-b text-left text-xs text-muted-foreground">
-            <th className="w-8 py-2">
+            <th className="py-2">
               <input
                 type="checkbox"
                 aria-label="Select this page"
@@ -386,15 +396,15 @@ function NotificationTableRow({
           onChange={onToggle}
         />
       </td>
-      <td className="w-5 align-top">
+      <td className="py-3 align-top">
         {unread && (
           <span
-            className="mt-2 block size-2 rounded-full bg-blue-500"
+            className="mx-auto mt-1.5 block size-2 rounded-full bg-blue-500"
             aria-label="Unread"
           />
         )}
       </td>
-      <td className="w-7 py-3 align-top">
+      <td className="py-3 align-top">
         <NotificationKindIcon kind={notification.kind} className="mt-0.5" />
       </td>
       <td className="py-3 pr-4">
@@ -411,10 +421,10 @@ function NotificationTableRow({
           </div>
         )}
       </td>
-      <td className="w-56 truncate py-3 pr-4 text-xs font-normal text-muted-foreground">
+      <td className="truncate py-3 pr-4 text-xs font-normal text-muted-foreground">
         {notification.courseTitle}
       </td>
-      <td className="w-20 py-3 text-right text-xs font-normal text-muted-foreground">
+      <td className="py-3 text-right text-xs font-normal text-muted-foreground">
         {formatRelativeTime(notification.createdAt)}
       </td>
     </tr>
