@@ -6,9 +6,11 @@ import {
   comments,
   courseRatings,
   courses,
+  enrollments,
   lessons,
   modules,
   notifications,
+  purchases,
   users,
   CourseStatus,
   NotificationKind,
@@ -16,6 +18,7 @@ import {
 } from "~/db/schema";
 import { MAX_COMMENT_LENGTH, MIN_COMMENT_LENGTH } from "~/lib/comments";
 import { MAX_RATING, MIN_RATING } from "~/lib/ratings";
+import { checkPppAccess } from "~/lib/ppp";
 
 // ─── Notifications ───
 // The actions that trigger Notifications (posting a question or a reply,
@@ -408,31 +411,89 @@ function lessonUrl(courseSlug: string, lessonId: number) {
   return `/courses/${courseSlug}/lessons/${lessonId}`;
 }
 
+/**
+ * Where a Notification about a comment leads: the comment on its lesson, the
+ * lesson with no anchor once the comment was deleted, or "unavailable" once
+ * the lesson was deleted.
+ */
+function commentTarget(row: NotificationRow): ClickTarget {
+  const { lessonId, commentId } = row.notification;
+  if (lessonId === null || row.lessonExists === null) {
+    return { type: "unavailable" };
+  }
+  const url = lessonUrl(row.courseSlug, lessonId);
+  const commentGone =
+    commentId === null ||
+    row.commentBody === null ||
+    row.commentDeletedAt !== null;
+  return {
+    type: "url",
+    url: commentGone ? url : `${url}#comment-${commentId}`,
+  };
+}
+
 /** Where each kind of Notification leads, checked at click time. */
 function clickTarget(row: NotificationRow): ClickTarget {
   const { notification } = row;
   switch (notification.kind) {
-    case NotificationKind.NewQuestion: {
-      if (notification.lessonId === null || row.lessonExists === null) {
-        return { type: "unavailable" };
-      }
-      const url = lessonUrl(row.courseSlug, notification.lessonId);
-      return { type: "url", url: `${url}#comment-${notification.commentId}` };
-    }
+    case NotificationKind.NewQuestion:
+      return commentTarget(row);
     default:
       return { type: "stay" };
   }
 }
 
 /**
+ * May this user read the course's content, by the lesson page's rules
+ * (`getAccess` in access.server.ts)? Staff always can; Students need an
+ * enrollment that isn't PPP-blocked from the country they are in now.
+ */
+function canViewCourseContent(
+  db: Queryable,
+  userId: number,
+  courseId: number,
+  country: string | null
+): boolean {
+  const course = getCourse(db, courseId);
+  if (!course) return false;
+  if (course.instructorId === userId || isPlatformAdmin(db, userId)) {
+    return true;
+  }
+
+  const enrollment = db
+    .select({ id: enrollments.id })
+    .from(enrollments)
+    .where(
+      and(eq(enrollments.userId, userId), eq(enrollments.courseId, courseId))
+    )
+    .get();
+  if (!enrollment) return false;
+
+  const purchase = db
+    .select({ country: purchases.country })
+    .from(purchases)
+    .where(and(eq(purchases.userId, userId), eq(purchases.courseId, courseId)))
+    .get();
+  return !checkPppAccess(
+    course.price,
+    course.pppEnabled,
+    purchase?.country ?? null,
+    country
+  ).blocked;
+}
+
+/**
  * Marks one of a recipient's Notifications read and works out where clicking
- * it leads. Another user's Notification is "not found".
+ * it leads, checked at that moment: a link into a course they can no longer
+ * see is "unavailable". `country` is where they are now (for PPP), as
+ * `resolveCountry` gives it. Another user's Notification is "not found".
  */
 export function resolveNotificationClick(
   db: Db,
   notificationId: number,
   recipientId: number,
-  now: Date = new Date()
+  now: Date = new Date(),
+  country: string | null = null
 ): ResolveClickResult {
   const ownedBy = and(
     eq(notifications.id, notificationId),
@@ -451,7 +512,14 @@ export function resolveNotificationClick(
       .run();
   }
 
-  return { ok: true, target: clickTarget(row) };
+  const target = clickTarget(row);
+  if (
+    target.type === "url" &&
+    !canViewCourseContent(db, recipientId, row.notification.courseId, country)
+  ) {
+    return { ok: true, target: { type: "unavailable" } };
+  }
+  return { ok: true, target };
 }
 
 // ─── Counting Notifications ───

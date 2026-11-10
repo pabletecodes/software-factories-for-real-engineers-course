@@ -425,6 +425,54 @@ describe("resolveNotificationClick", () => {
   });
 });
 
+describe("clicking a Notification whose target is gone", () => {
+  function askAndGetNotificationId() {
+    const result = postComment(db, base.user.id, lessonId, null, "How?");
+    if (!result.ok) throw new Error(result.error);
+    const [notification] = listLatestNotifications(db, base.instructor.id);
+    return { questionId: result.comment.id, notificationId: notification.id };
+  }
+
+  it("leads to the lesson with no anchor once the comment was deleted", () => {
+    const { questionId, notificationId } = askAndGetNotificationId();
+    deletePost(db, questionId, base.user.id);
+
+    expect(
+      resolveNotificationClick(db, notificationId, base.instructor.id)
+    ).toEqual({
+      ok: true,
+      target: { type: "url", url: `/courses/test-course/lessons/${lessonId}` },
+    });
+    expect(countUnreadNotifications(db, base.instructor.id)).toBe(0);
+  });
+
+  it("is no longer available once the lesson was deleted", () => {
+    const { notificationId } = askAndGetNotificationId();
+    // Deleting a lesson does not clean up its comments; take them out first.
+    db.delete(schema.comments).run();
+    db.delete(schema.lessons).where(eq(schema.lessons.id, lessonId)).run();
+
+    expect(
+      resolveNotificationClick(db, notificationId, base.instructor.id)
+    ).toEqual({ ok: true, target: { type: "unavailable" } });
+    expect(countUnreadNotifications(db, base.instructor.id)).toBe(0);
+  });
+
+  it("is no longer available to someone who can no longer see the course", () => {
+    const { notificationId } = askAndGetNotificationId();
+    const newInstructor = addUser("Nadia", UserRole.Instructor);
+    db.update(schema.courses)
+      .set({ instructorId: newInstructor.id })
+      .where(eq(schema.courses.id, base.course.id))
+      .run();
+
+    expect(
+      resolveNotificationClick(db, notificationId, base.instructor.id)
+    ).toEqual({ ok: true, target: { type: "unavailable" } });
+    expect(countUnreadNotifications(db, base.instructor.id)).toBe(0);
+  });
+});
+
 describe("deleting a lesson that Notifications reference", () => {
   it("still deletes the lesson with its module, and the Notification stays readable", () => {
     postComment(db, base.user.id, lessonId, null, "How?");
