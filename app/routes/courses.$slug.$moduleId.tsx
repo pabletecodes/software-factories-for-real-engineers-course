@@ -1,11 +1,10 @@
 import { Link } from "react-router";
 import type { Route } from "./+types/courses.$slug.$moduleId";
-import { getCurrentUserId } from "~/lib/session";
+import { can } from "~/lib/access.server";
 import { db } from "~/db";
 import {
   categories,
   courses,
-  enrollments,
   lessonProgress,
   lessons,
   modules,
@@ -111,18 +110,6 @@ function getModuleWithLessons(id: number) {
   return { ...mod, lessons: moduleLessons };
 }
 
-function isUserEnrolled(userId: number, courseId: number) {
-  const existing = db
-    .select()
-    .from(enrollments)
-    .where(
-      and(eq(enrollments.userId, userId), eq(enrollments.courseId, courseId))
-    )
-    .get();
-
-  return !!existing;
-}
-
 function getLessonProgressForCourse(userId: number, courseId: number) {
   const courseModules = db
     .select({ id: modules.id })
@@ -186,14 +173,15 @@ export async function loader({ params, request }: Route.LoaderArgs) {
     throw data("Module not found in this course", { status: 404 });
   }
 
-  const currentUserId = await getCurrentUserId(request);
-
-  let enrolled = false;
+  // A PPP-blocked Student sees the page as if they weren't enrolled, the same
+  // as on the lesson pages.
+  const { userId: currentUserId, takingCourse: enrolled } = await can(
+    request,
+    course.id
+  );
   let lessonProgressMap: Record<number, string> = {};
 
   if (currentUserId) {
-    enrolled = isUserEnrolled(currentUserId, course.id);
-
     if (enrolled) {
       const progressRecords = getLessonProgressForCourse(
         currentUserId,

@@ -22,11 +22,19 @@ _Avoid_: Admin (on its own), the team, Staff
 A Student who buys and manages a Team Licence. A Team Admin has no say over Refund Requests.
 _Avoid_: Admin (on its own)
 
+**Course Staff**:
+The people who speak for a course: its own Instructor and any Platform Admin. Course Staff need no Enrollment to read the course.
+_Avoid_: Staff (on its own), Owner, Moderator
+
 ### Enrollment
 
 **Enrollment**:
 A Student's place on a course, which lets them take it. A Student has at most one Enrollment per course, whether it came from an Individual Purchase or a Claimed Seat.
-_Avoid_: Place on a course, Access
+_Avoid_: Place on a course, Access (that's Course Access, which is broader)
+
+**Course Access**:
+What a person may do on a course: read its content, or speak for it as Course Staff. Course Staff always have it; a Student has it through an Enrollment, unless their discounted Purchase ties it to another country.
+_Avoid_: Permission, Entitlement, Enrollment
 
 **Lapsed**:
 A Student who has lost their Enrollment on a course but still has progress on it.

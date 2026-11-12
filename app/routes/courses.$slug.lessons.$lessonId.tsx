@@ -3,7 +3,7 @@ import { Link, useFetcher, useNavigate } from "react-router";
 import { toast } from "sonner";
 import type { Route } from "./+types/courses.$slug.lessons.$lessonId";
 import { getCurrentUserId } from "~/lib/session";
-import { getAccess, requireContentAccess } from "~/lib/access.server";
+import { can, mustReadContent } from "~/lib/access.server";
 import { renderComment } from "~/lib/comment-markdown.server";
 import { markdown, type Markdown } from "~/lib/text";
 import {
@@ -66,7 +66,7 @@ import { renderMarkdown } from "~/lib/markdown.server";
 import { YouTubePlayer } from "~/components/youtube-player";
 import { data, isRouteErrorResponse } from "react-router";
 import { z } from "zod";
-import { COUNTRIES } from "~/lib/ppp";
+import { countryName } from "~/lib/ppp";
 import { parseFormData, parseParams } from "~/lib/validation";
 
 const lessonParamsSchema = z.object({
@@ -669,16 +669,16 @@ export async function loader({ params, request }: Route.LoaderArgs) {
     throw data("Lesson not found in this course", { status: 404 });
   }
 
-  const access = await getAccess(request, course.id);
+  const access = await can(request, course.id);
   const currentUserId = access.userId;
-  const enrolled = access.enrolled;
+  const { takingCourse, pppBlock, readContent: canViewContent } = access;
   let lessonStatus: string | null = null;
   let lastWatchPosition = 0;
   let watchProgress = 0;
   let lessonProgressMap: Record<number, string> = {};
 
   if (currentUserId) {
-    if (enrolled) {
+    if (takingCourse) {
       // Mark lesson as in-progress when viewed
       markLessonInProgress(currentUserId, lessonId);
       const progress = getLessonProgress(currentUserId, lessonId);
@@ -707,11 +707,6 @@ export async function loader({ params, request }: Route.LoaderArgs) {
       }
     }
   }
-
-  // PPP Access Guard — resolved by getAccess, which treats a blocked user as
-  // having no access to the course's content at all.
-  const { pppBlocked, pppBlockedCountry, pppPurchaseCountry, canViewContent } =
-    access;
 
   // Comments are confidential to the course: only people who can read the
   // lesson can read the discussion on it.
@@ -809,7 +804,7 @@ export async function loader({ params, request }: Route.LoaderArgs) {
     lesson,
     contentHtml,
     lessonStatus,
-    enrolled,
+    takingCourse,
     currentUserId,
     prevLesson,
     nextLesson,
@@ -818,12 +813,10 @@ export async function loader({ params, request }: Route.LoaderArgs) {
     lastWatchPosition,
     watchProgress,
     lessonProgressMap,
-    pppBlocked,
-    pppBlockedCountry,
-    pppPurchaseCountry,
+    pppBlock,
     comments,
     canViewContent,
-    canModerate: access.isStaff,
+    canModerate: access.speakForCourse,
     instructorName: instructor?.name ?? "your instructor",
     bookmarked,
     note: note ? { body: note.body, updatedAt: note.updatedAt } : null,
@@ -853,7 +846,7 @@ export async function action({ params, request }: Route.ActionArgs) {
     intent === "edit-comment" ||
     intent === "delete-comment"
   ) {
-    const access = await requireContentAccess(request, course.id);
+    const reader = await mustReadContent(request, course.id);
 
     try {
       if (intent === "create-comment") {
@@ -908,7 +901,7 @@ export async function action({ params, request }: Route.ActionArgs) {
         db,
         parsed.data.commentId,
         currentUserId,
-        access.isStaff,
+        reader.speakForCourse,
         new Date(),
         await defaultNotifications()
       );
@@ -927,7 +920,7 @@ export async function action({ params, request }: Route.ActionArgs) {
   // Bookmark and Note intents re-check access here, like the comment intents
   // above — loader guards don't protect actions.
   if (intent === "toggle-bookmark" || intent === "save-note") {
-    await requireContentAccess(request, course.id);
+    await mustReadContent(request, course.id);
     requireLessonInCourse(lessonId, course.id);
 
     if (intent === "toggle-bookmark") {
@@ -1020,7 +1013,7 @@ export default function LessonViewer({ loaderData }: Route.ComponentProps) {
     lesson,
     contentHtml,
     lessonStatus,
-    enrolled,
+    takingCourse,
     currentUserId,
     prevLesson,
     nextLesson,
@@ -1029,9 +1022,7 @@ export default function LessonViewer({ loaderData }: Route.ComponentProps) {
     lastWatchPosition,
     watchProgress,
     lessonProgressMap,
-    pppBlocked,
-    pppBlockedCountry,
-    pppPurchaseCountry,
+    pppBlock,
     comments,
     canViewContent,
     canModerate,
@@ -1063,15 +1054,9 @@ export default function LessonViewer({ loaderData }: Route.ComponentProps) {
   const quizResult = quizFetcher.data?.quizResult ?? null;
   const isSubmittingQuiz = quizFetcher.state !== "idle";
 
-  if (pppBlocked) {
-    const purchaseCountryName = pppPurchaseCountry
-      ? (COUNTRIES.find((c) => c.code === pppPurchaseCountry)?.name ??
-        pppPurchaseCountry)
-      : "your original country";
-    const currentCountryName = pppBlockedCountry
-      ? (COUNTRIES.find((c) => c.code === pppBlockedCountry)?.name ??
-        pppBlockedCountry)
-      : "a different country";
+  if (pppBlock) {
+    const purchaseCountryName = countryName(pppBlock.boughtIn);
+    const currentCountryName = countryName(pppBlock.here);
 
     return (
       <div className="flex min-h-[60vh] items-center justify-center p-6">
@@ -1109,7 +1094,7 @@ export default function LessonViewer({ loaderData }: Route.ComponentProps) {
         curriculum={curriculum}
         currentLessonId={lesson.id}
         lessonProgressMap={lessonProgressMap}
-        enrolled={enrolled}
+        enrolled={takingCourse}
       />
 
       <div className="flex-1 p-6 lg:p-8">
@@ -1174,7 +1159,7 @@ export default function LessonViewer({ loaderData }: Route.ComponentProps) {
               startPosition={lastWatchPosition}
               durationMinutes={lesson.durationMinutes}
               watchProgress={watchProgress}
-              trackingEnabled={enrolled && !!currentUserId}
+              trackingEnabled={takingCourse && !!currentUserId}
               autoplay={autoplay}
               onToggleAutoplay={toggleAutoplay}
             />
@@ -1200,7 +1185,7 @@ export default function LessonViewer({ loaderData }: Route.ComponentProps) {
           )}
 
           {/* Quiz Section */}
-          {quiz && enrolled && currentUserId && (
+          {quiz && takingCourse && currentUserId && (
             <QuizSection
               quiz={quiz}
               bestAttempt={bestAttempt}
@@ -1211,7 +1196,7 @@ export default function LessonViewer({ loaderData }: Route.ComponentProps) {
           )}
 
           {/* Mark Complete / Up Next */}
-          {enrolled && currentUserId && (
+          {takingCourse && currentUserId && (
             <div className="mb-8">
               {isCompleted ? (
                 <div className="flex items-center gap-3">
