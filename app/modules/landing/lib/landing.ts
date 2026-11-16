@@ -1,14 +1,7 @@
 import { and, count, countDistinct, desc, eq, inArray, sql } from "drizzle-orm";
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import * as schema from "~/db/schema";
-import {
-  categories,
-  courses,
-  CourseStatus,
-  lessons,
-  modules,
-  users,
-} from "~/db/schema";
+import { courses, CourseStatus, lessons, modules, users } from "~/db/schema";
 
 export type Db = BetterSQLite3Database<typeof schema>;
 
@@ -19,7 +12,6 @@ export type FeaturedCourse = {
   description: string;
   coverImageUrl: string | null;
   instructorName: string;
-  categoryName: string;
   lessonCount: number;
 };
 
@@ -46,11 +38,9 @@ function getFeaturedCourses(db: Db, limit: number) {
       description: courses.description,
       coverImageUrl: courses.coverImageUrl,
       instructorName: users.name,
-      categoryName: categories.name,
     })
     .from(courses)
     .innerJoin(users, eq(courses.instructorId, users.id))
-    .innerJoin(categories, eq(courses.categoryId, categories.id))
     .where(isPublished)
     .orderBy(desc(courses.createdAt), desc(courses.id))
     .limit(limit)

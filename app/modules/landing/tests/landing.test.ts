@@ -110,7 +110,7 @@ describe("landing.get featured courses", () => {
     expect(titles).toEqual([baseCourse.title]);
   });
 
-  it("names each course's instructor and category", () => {
+  it("names each course's instructor", () => {
     const [course] = getLanding().featuredCourses;
 
     expect(course).toMatchObject({
@@ -118,7 +118,6 @@ describe("landing.get featured courses", () => {
       description: baseCourse.description,
       coverImageUrl: null,
       instructorName: "Test Instructor",
-      categoryName: "Programming",
     });
   });
 
