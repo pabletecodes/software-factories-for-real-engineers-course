@@ -65,6 +65,7 @@ export default function Home({ loaderData }: Route.ComponentProps) {
     countryTierInfo,
     countries,
   } = loaderData;
+  const isSignedIn = currentUser !== null;
   const [isDark, setIsDark] = useState(false);
 
   useEffect(() => {
@@ -129,11 +130,11 @@ export default function Home({ loaderData }: Route.ComponentProps) {
       <LandingHero
         courseCount={stats.courses}
         covers={featuredCourses}
-        isSignedIn={currentUser !== null}
+        isSignedIn={isSignedIn}
       />
       <LandingStatsStrip stats={stats} />
       <FeaturedCourses courses={featuredCourses} />
-      <LandingFooter isSignedIn={currentUser !== null} />
+      <LandingFooter isSignedIn={isSignedIn} />
 
       <DevUI
         users={users}
