@@ -1,4 +1,4 @@
-import type { ThreadComment } from "./data";
+import type { ThreadComment } from "./data.server";
 
 import { renderComment } from "~/lib/comment-markdown.server";
 import { type RenderedComment } from "~/components/comment-thread";

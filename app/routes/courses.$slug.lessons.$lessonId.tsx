@@ -17,13 +17,15 @@ import {
   calculateWatchProgress,
   getCommentById,
   getLessonThread,
+} from "~/modules/lesson-viewer/data.server";
+import {
   getQuizById,
   getQuizByLessonId,
   getQuizWithQuestions,
   getBestAttempt,
   computeResult,
   renderThread,
-} from "~/modules/lesson-viewer/index.server";
+} from "~/modules/lesson-viewer/quiz.server";
 import { FullLesson } from "~/components/lesson-full";
 import { LockedLesson } from "~/components/lesson-locked";
 
