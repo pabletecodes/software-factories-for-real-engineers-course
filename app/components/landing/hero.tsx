@@ -16,10 +16,13 @@ export function LandingHero({
   return (
     <section className="mx-auto grid max-w-6xl items-center gap-16 px-6 py-20 lg:grid-cols-[1.1fr_1fr] lg:py-28">
       <div>
-        <p className="inline-flex items-center gap-2 rounded-full border border-border px-3 py-1 text-sm text-muted-foreground">
-          <span className="size-2 rounded-full bg-chart-1" />
-          {courseCount} self-paced courses, open now
-        </p>
+        {courseCount > 0 && (
+          <p className="inline-flex items-center gap-2 rounded-full border border-border px-3 py-1 text-sm text-muted-foreground">
+            <span className="size-2 rounded-full bg-chart-1" />
+            {courseCount} self-paced {courseCount === 1 ? "course" : "courses"},
+            open now
+          </p>
+        )}
         <h1 className="mt-6 text-5xl font-bold tracking-tight sm:text-6xl">
           Learn to code,
           <br />
