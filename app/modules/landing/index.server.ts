@@ -3,8 +3,6 @@ import { getLandingPage, type Db } from "./lib/landing";
 
 export type { FeaturedCourse, LandingPage, LandingStats } from "./lib/landing";
 
-const FEATURED_COURSE_COUNT = 3;
-
 /**
  * What the landing page (`/`) shows, bound to a database. The app uses
  * `landing`, which reads the app database; tests build their own against a
@@ -17,7 +15,7 @@ export function createLanding(database: Db) {
      * catalogue totals. Only published courses count anywhere.
      */
     get() {
-      return getLandingPage(database, FEATURED_COURSE_COUNT);
+      return getLandingPage(database);
     },
   };
 }
