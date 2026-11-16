@@ -1,4 +1,4 @@
-import { and, count, countDistinct, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, count, countDistinct, desc, eq, inArray } from "drizzle-orm";
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import * as schema from "~/db/schema";
 import { courses, CourseStatus, lessons, modules, users } from "~/db/schema";
@@ -79,7 +79,7 @@ function getStats(db: Db): LandingStats {
     .get();
 
   const lessonStats = db
-    .select({ lessons: sql<number>`count(${lessons.id})` })
+    .select({ lessons: count(lessons.id) })
     .from(lessons)
     .innerJoin(modules, eq(lessons.moduleId, modules.id))
     .innerJoin(courses, and(eq(modules.courseId, courses.id), isPublished))
