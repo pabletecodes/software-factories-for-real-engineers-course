@@ -12,11 +12,13 @@ export function describeDraft(
   savedBody: string | null,
   maxLength: number
 ): NoteDraftStatus {
-  const length = draft.length;
+  // saveNote trims the body before it checks the limit and stores it, so
+  // whitespace at either end is neither counted nor a change.
+  const kept = draft.trim();
+  const length = kept.length;
   const tooLong = length > maxLength;
-  const empty = draft.trim().length === 0;
-  // saveNote stores the trimmed body, so trailing whitespace is not a change.
-  const unsaved = draft.trim() !== (savedBody ?? "");
+  const empty = length === 0;
+  const unsaved = kept !== (savedBody ?? "");
   return {
     length,
     maxLength,

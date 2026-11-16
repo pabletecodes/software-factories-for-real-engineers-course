@@ -56,4 +56,11 @@ describe("noteDraftStatus", () => {
     expect(status.tooLong).toBe(true);
     expect(status.canSave).toBe(false);
   });
+
+  it("counts only the text the save keeps", () => {
+    const status = noteDraftStatus(`${"a".repeat(MAX_NOTE_LENGTH)}\n `, null);
+    expect(status.length).toBe(MAX_NOTE_LENGTH);
+    expect(status.tooLong).toBe(false);
+    expect(status.canSave).toBe(true);
+  });
 });
